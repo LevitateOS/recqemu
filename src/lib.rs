@@ -22,6 +22,12 @@
 //! cmd.status()?;
 //! ```
 
+pub mod patterns;
+pub mod process;
+pub mod serial;
+
+pub use serial::{CommandResult, Console};
+
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

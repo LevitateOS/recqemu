@@ -2,7 +2,7 @@
 
 ## What is recqemu?
 
-Shared QEMU command builder and utilities. Used by both leviso (development) and install-tests (E2E testing).
+Shared QEMU command builder, serial console, and utilities. Used by both leviso (development) and install-tests (E2E testing).
 
 ## What Belongs Here
 
@@ -10,16 +10,18 @@ Shared QEMU command builder and utilities. Used by both leviso (development) and
 - `find_ovmf()` / `find_ovmf_vars()` - OVMF firmware discovery
 - `create_disk()` - qcow2 disk creation
 - `kvm_available()` - KVM detection
+- `patterns` - Boot/error pattern constants
+- `process` - Test locking and stale process cleanup
+- `serial` - Serial console I/O (Console, exec, auth, boot)
 
 ## What Does NOT Belong Here
 
 | Don't put here | Put it in |
 |----------------|-----------|
-| Serial console I/O | `testing/install-tests/src/qemu/serial/` |
 | QMP protocol | `testing/install-tests/src/qemu/qmp/` |
-| Boot pattern matching | `leviso/src/qemu.rs` |
 | Anti-cheat protections | `testing/install-tests/src/qemu/builder.rs` |
-| Test locking | `testing/install-tests/` |
+| DistroContext-aware code | `testing/install-tests/` |
+| Executor trait | `testing/install-tests/src/executor.rs` |
 
 ## Commands
 
@@ -31,7 +33,7 @@ cargo test
 ## Usage
 
 ```rust
-use recqemu::{QemuBuilder, find_ovmf, create_disk};
+use recqemu::{QemuBuilder, Console, find_ovmf, create_disk};
 
 // Create a disk
 create_disk(Path::new("disk.qcow2"), "20G")?;
@@ -43,12 +45,18 @@ let mut cmd = QemuBuilder::new()
     .disk(disk_path)
     .uefi(find_ovmf().unwrap())
     .user_network()
-    .build_interactive();
+    .nographic()
+    .build_piped();
 
-cmd.status()?;
+// Spawn and control via serial
+let mut child = cmd.spawn()?;
+let mut console = Console::new(&mut child)?;
+console.wait_for_boot(Duration::from_secs(90))?;
+console.exec_ok("ls -la", Duration::from_secs(10))?;
 ```
 
 ## Consumers
 
 - `leviso` - `run_iso()` and `test_iso()` commands
 - `install-tests` - E2E installation testing (extends with anti-cheat)
+- `fsdbg` - Future: boot command for runtime verification
