@@ -1,0 +1,28 @@
+[package]
+name = "recqemu"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.93"
+description = "QEMU command builder and utilities for Linux VM testing"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/LevitateOS/recqemu"
+homepage = "https://github.com/LevitateOS/recqemu"
+documentation = "https://github.com/LevitateOS/recqemu#readme"
+readme = "README.md"
+keywords = ["qemu", "linux", "vm", "testing", "virtualization"]
+categories = ["command-line-utilities", "development-tools::testing"]
+authors = ["LevitateOS Contributors"]
+exclude = [
+    ".github/*",
+    "CLAUDE.md",
+]
+
+[dependencies]
+anyhow = "1.0"
+
+[dev-dependencies]
+leviso-cheat-test = { path = "../../testing/cheat-test" }
+
+[profile.release]
+strip = true
+lto = true
