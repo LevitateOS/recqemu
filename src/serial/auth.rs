@@ -243,11 +243,7 @@ impl Console {
                     state,
                     retry_count + 1,
                     diagnostics,
-                    format!(
-                        "Timeout after {:?} while {}",
-                        timeout,
-                        state.description()
-                    ),
+                    format!("Timeout after {:?} while {}", timeout, state.description()),
                 ));
             }
 
@@ -285,8 +281,7 @@ impl Console {
                     match state {
                         LoginState::WaitingForLoginPrompt => {
                             if lower.contains("login:") {
-                                self.stdin
-                                    .write_all(format!("{}\n", username).as_bytes())?;
+                                self.stdin.write_all(format!("{}\n", username).as_bytes())?;
                                 self.stdin.flush()?;
                                 state = LoginState::WaitingForPasswordPrompt;
                             }
@@ -294,8 +289,7 @@ impl Console {
 
                         LoginState::WaitingForPasswordPrompt => {
                             if lower.contains("password") {
-                                self.stdin
-                                    .write_all(format!("{}\n", password).as_bytes())?;
+                                self.stdin.write_all(format!("{}\n", password).as_bytes())?;
                                 self.stdin.flush()?;
                                 state = LoginState::WaitingForShellPrompt;
                             } else if lower.contains("login incorrect")
@@ -343,15 +337,16 @@ impl Console {
 
                         LoginState::VerifyingShell => {
                             // Check for our verification marker
-                            if trimmed.contains(LOGIN_OK_MARKER)
-                                && !trimmed.starts_with("echo ")
-                            {
+                            if trimmed.contains(LOGIN_OK_MARKER) && !trimmed.starts_with("echo ") {
                                 // Brief drain for trailing output
                                 std::thread::sleep(Duration::from_millis(100));
                                 while let Ok(l) = self.rx.try_recv() {
                                     self.output_buffer.push(l);
                                 }
-                                return Ok(AuthResult::success(LoginState::Complete, retry_count + 1));
+                                return Ok(AuthResult::success(
+                                    LoginState::Complete,
+                                    retry_count + 1,
+                                ));
                             }
 
                             // Login prompt means verification failed

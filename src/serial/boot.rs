@@ -46,7 +46,11 @@ impl Console {
             // After login, shell emits ___SHELL_READY___ for command execution
             // Also accept multi-user.target - proves system booted successfully even if
             // serial console login prompt has issues (VT emulation quirks in QEMU)
-            &["___SHELL_READY___", "levitateos login:", "multi-user.target"],
+            &[
+                "___SHELL_READY___",
+                "levitateos login:",
+                "multi-user.target",
+            ],
             // Only critical errors - service failures are tracked separately
             CRITICAL_BOOT_ERRORS,
             true, // Track service failures for later diagnostic capture

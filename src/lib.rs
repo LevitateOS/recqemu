@@ -257,9 +257,15 @@ impl QemuBuilder {
         // CD-ROM via virtio-scsi
         if let Some(cdrom) = &self.cdrom {
             cmd.args([
-                "-device", "virtio-scsi-pci,id=scsi0",
-                "-device", "scsi-cd,drive=cdrom0,bus=scsi0.0",
-                "-drive", &format!("id=cdrom0,if=none,format=raw,readonly=on,file={}", cdrom.display()),
+                "-device",
+                "virtio-scsi-pci,id=scsi0",
+                "-device",
+                "scsi-cd,drive=cdrom0,bus=scsi0.0",
+                "-drive",
+                &format!(
+                    "id=cdrom0,if=none,format=raw,readonly=on,file={}",
+                    cdrom.display()
+                ),
             ]);
         }
 
@@ -275,7 +281,10 @@ impl QemuBuilder {
         if let Some(ovmf_code) = &self.ovmf_code {
             cmd.args([
                 "-drive",
-                &format!("if=pflash,format=raw,readonly=on,file={}", ovmf_code.display()),
+                &format!(
+                    "if=pflash,format=raw,readonly=on,file={}",
+                    ovmf_code.display()
+                ),
             ]);
         }
         if let Some(ovmf_vars) = &self.ovmf_vars {
@@ -424,7 +433,10 @@ mod tests {
     #[test]
     fn test_builder_defaults() {
         let cmd = QemuBuilder::new().build();
-        let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
 
         // Should have memory and SMP
         assert!(args.iter().any(|a| a == "-m"));
@@ -433,10 +445,11 @@ mod tests {
 
     #[test]
     fn test_builder_cdrom() {
-        let cmd = QemuBuilder::new()
-            .cdrom("/tmp/test.iso")
-            .build();
-        let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
+        let cmd = QemuBuilder::new().cdrom("/tmp/test.iso").build();
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
 
         // Should have virtio-scsi
         assert!(args.iter().any(|a| a == "virtio-scsi-pci,id=scsi0"));

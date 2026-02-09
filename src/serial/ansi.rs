@@ -23,8 +23,8 @@ pub fn strip_ansi_codes(s: &str) -> String {
                 // CSI sequences: \x1b[...
                 Some(&'[') => {
                     chars.next(); // consume '['
-                    // Skip until we find a letter (the command terminator)
-                    // CSI sequences can have parameters (numbers, ;) and intermediate bytes
+                                  // Skip until we find a letter (the command terminator)
+                                  // CSI sequences can have parameters (numbers, ;) and intermediate bytes
                     while let Some(&next) = chars.peek() {
                         chars.next();
                         // Final byte is 0x40-0x7E (@ through ~)
@@ -69,7 +69,7 @@ pub fn strip_ansi_codes(s: &str) -> String {
                         || c2 == ')' =>
                 {
                     chars.next(); // consume the character
-                    // Some sequences like \x1b( have one more char (charset selection)
+                                  // Some sequences like \x1b( have one more char (charset selection)
                     if c2 == '(' || c2 == ')' {
                         chars.next();
                     }
