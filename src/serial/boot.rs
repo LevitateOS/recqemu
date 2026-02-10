@@ -118,7 +118,61 @@ impl Console {
                 );
             }
 
-            match self.rx.recv_timeout(Duration::from_millis(100)) {
+            // Drain any buffered output before blocking.
+            // QEMU's stdout may have multiple lines buffered that try_recv()
+            // can pick up immediately, avoiding missed output between polls.
+            while let Ok(line) = self.rx.try_recv() {
+                last_output_time = Instant::now();
+                self.output_buffer.push(line.clone());
+
+                if line.contains("UEFI") || line.contains("BdsDxe") || line.contains("EFI") {
+                    saw_uefi = true;
+                }
+                if line.contains("systemd-boot")
+                    || line.contains("Loading Linux")
+                    || line.contains("loader")
+                {
+                    saw_bootloader = true;
+                }
+                if line.contains("Linux version")
+                    || line.contains("Booting Linux")
+                    || line.contains("KASLR")
+                {
+                    saw_kernel = true;
+                }
+
+                if track_service_failures {
+                    for pattern in SERVICE_FAILURE_PATTERNS {
+                        if line.contains(pattern) {
+                            self.failed_services.push(line.clone());
+                            eprintln!("  WARN: Service failure observed: {}", line.trim());
+                            break;
+                        }
+                    }
+                }
+
+                for pattern in error_patterns {
+                    if line.contains(pattern) {
+                        let last_lines: Vec<_> = self.output_buffer.iter().rev().take(30).collect();
+                        let context = last_lines
+                            .into_iter()
+                            .rev()
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        bail!("Boot failed: {}\n\nContext:\n{}", pattern, context);
+                    }
+                }
+
+                for pattern in success_patterns {
+                    if line.contains(pattern) {
+                        std::thread::sleep(Duration::from_millis(500));
+                        return Ok(());
+                    }
+                }
+            }
+
+            match self.rx.recv_timeout(Duration::from_millis(500)) {
                 Ok(line) => {
                     // Got output - reset stall timer
                     last_output_time = Instant::now();
