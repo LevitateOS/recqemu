@@ -308,6 +308,10 @@ impl QemuBuilder {
         // Display
         if self.nographic {
             cmd.arg("-nographic");
+            // Disable VGA when headless to avoid needing vgabios ROM files
+            if self.vga.is_none() {
+                cmd.args(["-vga", "none"]);
+            }
         } else if let Some(display) = &self.display {
             cmd.args(["-display", display]);
         }
@@ -364,6 +368,14 @@ impl QemuBuilder {
 ///
 /// Searches common locations across distros.
 pub fn find_ovmf() -> Option<PathBuf> {
+    // Check OVMF_PATH env var first (set by recipe when OVMF is extracted to .tools/)
+    if let Ok(path) = std::env::var("OVMF_PATH") {
+        let p = PathBuf::from(&path);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+
     let candidates = [
         // Fedora/RHEL
         "/usr/share/edk2/ovmf/OVMF_CODE.fd",
