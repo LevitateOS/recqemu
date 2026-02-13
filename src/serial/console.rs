@@ -12,6 +12,7 @@
 use anyhow::{Context, Result};
 use std::io::BufRead;
 use std::io::BufReader;
+use std::io::{Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout};
 use std::sync::mpsc::{self, Receiver, Sender};
 
@@ -74,5 +75,47 @@ impl Console {
                 break;
             }
         }
+    }
+
+    /// Attach host stdio to the guest serial console.
+    ///
+    /// This is intended for interactive debugging once automated setup has
+    /// completed. It will:
+    /// - Print all subsequent guest output to host stdout
+    /// - Forward host stdin bytes to the guest (so Ctrl+A, then X exits QEMU
+    ///   when using `-serial mon:stdio`)
+    ///
+    /// This consumes the `Console` and returns when QEMU exits (or its stdout
+    /// closes).
+    pub fn attach_stdio(self) -> Result<()> {
+        let Console { mut stdin, rx, .. } = self;
+
+        // Forward host stdin -> guest stdin (best-effort).
+        // We intentionally don't join this thread; it may block waiting for user input.
+        std::thread::spawn(move || {
+            let mut host_stdin = std::io::stdin().lock();
+            let mut buf = [0u8; 1024];
+            loop {
+                match host_stdin.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if stdin.write_all(&buf[..n]).is_err() {
+                            break;
+                        }
+                        let _ = stdin.flush();
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        // Forward guest stdout -> host stdout.
+        let mut host_stdout = std::io::stdout().lock();
+        while let Ok(line) = rx.recv() {
+            writeln!(host_stdout, "{}", line)?;
+            host_stdout.flush()?;
+        }
+
+        Ok(())
     }
 }
