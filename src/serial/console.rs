@@ -77,6 +77,16 @@ impl Console {
         }
     }
 
+    /// Replay currently buffered output lines to host stdout.
+    pub fn replay_output_buffer(&self) -> Result<()> {
+        let mut host_stdout = std::io::stdout().lock();
+        for line in &self.output_buffer {
+            writeln!(host_stdout, "{}", line)?;
+        }
+        host_stdout.flush()?;
+        Ok(())
+    }
+
     /// Attach host stdio to the guest serial console.
     ///
     /// This is intended for interactive debugging once automated setup has

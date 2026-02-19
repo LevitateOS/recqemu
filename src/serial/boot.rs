@@ -78,6 +78,7 @@ impl Console {
         track_service_failures: bool,
     ) -> Result<()> {
         let mut last_output_time = Instant::now();
+        let mut last_console_nudge = Instant::now();
 
         // Track what stage we're in for better error messages
         let mut saw_uefi = false;
@@ -88,6 +89,14 @@ impl Console {
         self.failed_services.clear();
 
         loop {
+            // Nudge serial console after kernel boot so getty/login surfaces that
+            // require input become visible on headless OpenRC paths.
+            if saw_kernel && last_console_nudge.elapsed() >= Duration::from_secs(3) {
+                let _ = std::io::Write::write_all(&mut self.stdin, b"\n");
+                let _ = std::io::Write::flush(&mut self.stdin);
+                last_console_nudge = Instant::now();
+            }
+
             // STALL DETECTION: Only fail if no output for stall_timeout
             // This allows boot to take as long as needed while making progress
             if last_output_time.elapsed() > stall_timeout {

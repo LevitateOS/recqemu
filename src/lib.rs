@@ -64,11 +64,19 @@ pub struct QemuBuilder {
     no_reboot: bool,
     enable_kvm: bool,
     user_network: bool,
+    user_network_hostfwd: Vec<(u16, u16)>,
     vga: Option<String>,
     display: Option<String>,
     qmp_socket: Option<PathBuf>,
     vnc_display: Option<u16>,
     nodefaults: bool,
+    fw_cfg_files: Vec<FwCfgFile>,
+}
+
+#[derive(Debug, Clone)]
+struct FwCfgFile {
+    name: String,
+    path: PathBuf,
 }
 
 impl QemuBuilder {
@@ -182,6 +190,13 @@ impl QemuBuilder {
         self
     }
 
+    /// Enable user networking with host TCP forward to guest TCP.
+    pub fn user_network_with_hostfwd(mut self, host_port: u16, guest_port: u16) -> Self {
+        self.user_network = true;
+        self.user_network_hostfwd.push((host_port, guest_port));
+        self
+    }
+
     /// Set VGA adapter type (e.g., "std", "virtio").
     pub fn vga(mut self, vga_type: &str) -> Self {
         self.vga = Some(vga_type.to_string());
@@ -209,6 +224,18 @@ impl QemuBuilder {
     /// Start with no default devices.
     pub fn nodefaults(mut self) -> Self {
         self.nodefaults = true;
+        self
+    }
+
+    /// Attach a file via QEMU fw_cfg.
+    ///
+    /// The guest can read this from:
+    /// `/sys/firmware/qemu_fw_cfg/by_name/<name>/raw`
+    pub fn fw_cfg_file(mut self, name: &str, path: impl Into<PathBuf>) -> Self {
+        self.fw_cfg_files.push(FwCfgFile {
+            name: name.to_string(),
+            path: path.into(),
+        });
         self
     }
 
@@ -266,6 +293,15 @@ impl QemuBuilder {
                     "id=cdrom0,if=none,format=raw,readonly=on,file={}",
                     cdrom.display()
                 ),
+                "-device",
+                "virtio-scsi-pci,id=scsi1",
+                "-device",
+                "scsi-hd,drive=cdparts0,bus=scsi1.0",
+                "-drive",
+                &format!(
+                    "id=cdparts0,if=none,format=raw,readonly=on,file={}",
+                    cdrom.display()
+                ),
             ]);
         }
 
@@ -301,7 +337,14 @@ impl QemuBuilder {
 
         // User-mode networking
         if self.user_network {
-            cmd.args(["-netdev", "user,id=net0"]);
+            let mut netdev = String::from("user,id=net0");
+            for (host_port, guest_port) in &self.user_network_hostfwd {
+                netdev.push_str(&format!(
+                    ",hostfwd=tcp:127.0.0.1:{}-:{}",
+                    host_port, guest_port
+                ));
+            }
+            cmd.args(["-netdev", &netdev]);
             cmd.args(["-device", "virtio-net-pci,netdev=net0"]);
         }
 
@@ -335,6 +378,14 @@ impl QemuBuilder {
         // QMP socket
         if let Some(socket) = &self.qmp_socket {
             cmd.args(["-qmp", &format!("unix:{},server,nowait", socket.display())]);
+        }
+
+        // fw_cfg file injection
+        for item in &self.fw_cfg_files {
+            cmd.args([
+                "-fw_cfg",
+                &format!("name={},file={}", item.name, item.path.display()),
+            ]);
         }
 
         // No reboot
@@ -465,6 +516,20 @@ mod tests {
 
         // Should have virtio-scsi
         assert!(args.iter().any(|a| a == "virtio-scsi-pci,id=scsi0"));
+    }
+
+    #[test]
+    fn test_builder_fw_cfg_file() {
+        let cmd = QemuBuilder::new()
+            .fw_cfg_file("opt/test/payload", "/tmp/payload.env")
+            .build();
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert!(args
+            .iter()
+            .any(|a| a == "name=opt/test/payload,file=/tmp/payload.env"));
     }
 
     #[test]
