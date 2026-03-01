@@ -54,6 +54,7 @@ pub struct QemuBuilder {
     initrd: Option<PathBuf>,
     append: Option<String>,
     cdrom: Option<PathBuf>,
+    extra_cdroms: Vec<PathBuf>,
     disk: Option<PathBuf>,
     ovmf_code: Option<PathBuf>,
     ovmf_vars: Option<PathBuf>,
@@ -127,6 +128,12 @@ impl QemuBuilder {
     /// Set ISO for CD-ROM boot (virtio-scsi).
     pub fn cdrom(mut self, path: impl Into<PathBuf>) -> Self {
         self.cdrom = Some(path.into());
+        self
+    }
+
+    /// Add an additional read-only CD-ROM image.
+    pub fn extra_cdrom(mut self, path: impl Into<PathBuf>) -> Self {
+        self.extra_cdroms.push(path.into());
         self
     }
 
@@ -305,12 +312,25 @@ impl QemuBuilder {
             ]);
         }
 
+        let mut extra_scsi_idx = if self.cdrom.is_some() { 2 } else { 0 };
+        for (idx, cdrom) in self.extra_cdroms.iter().enumerate() {
+            let scsi_id = format!("scsi{extra_scsi_idx}");
+            let drive_id = format!("extra_cdrom{idx}");
+            cmd.arg("-device")
+                .arg(format!("virtio-scsi-pci,id={scsi_id}"))
+                .arg("-device")
+                .arg(format!("scsi-cd,drive={drive_id},bus={scsi_id}.0"))
+                .arg("-drive")
+                .arg(format!(
+                    "id={drive_id},if=none,format=raw,readonly=on,file={}",
+                    cdrom.display()
+                ));
+            extra_scsi_idx += 1;
+        }
+
         // Virtio disk
         if let Some(disk) = &self.disk {
-            cmd.args([
-                "-drive",
-                &format!("file={},format=qcow2,if=virtio", disk.display()),
-            ]);
+            cmd.args(["-drive", &format!("file={},if=virtio", disk.display())]);
         }
 
         // UEFI firmware
@@ -447,6 +467,25 @@ pub fn find_ovmf() -> Option<PathBuf> {
 ///
 /// This file is copied and used as writable storage for UEFI boot entries.
 pub fn find_ovmf_vars() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("OVMF_VARS_PATH") {
+        let p = PathBuf::from(&path);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+
+    if let Ok(code_path) = std::env::var("OVMF_PATH") {
+        let code = PathBuf::from(code_path);
+        if let Some(dir) = code.parent() {
+            for candidate in ["OVMF_VARS.fd", "OVMF_VARS_4M.fd"] {
+                let vars = dir.join(candidate);
+                if vars.exists() {
+                    return Some(vars);
+                }
+            }
+        }
+    }
+
     let candidates = [
         // Fedora/RHEL
         "/usr/share/edk2/ovmf/OVMF_VARS.fd",
@@ -463,24 +502,36 @@ pub fn find_ovmf_vars() -> Option<PathBuf> {
     candidates.iter().map(PathBuf::from).find(|p| p.exists())
 }
 
-/// Create a qcow2 disk image.
+/// Create a VM disk image.
 ///
 /// # Arguments
 ///
 /// * `path` - Path for the new disk image
 /// * `size` - Size string (e.g., "20G", "1024M")
 pub fn create_disk(path: &Path, size: &str) -> Result<()> {
-    let status = Command::new("qemu-img")
+    let status = match Command::new("qemu-img")
         .args(["create", "-f", "qcow2"])
         .arg(path)
         .arg(size)
         .status()
-        .context("Failed to run qemu-img. Is QEMU installed?")?;
+    {
+        Ok(status) => status,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            bail!(
+                "missing required dependency 'qemu-img' in PATH; refusing raw fallback for '{}'.\n\
+Install tooling with: `recipe install --build-dir .artifacts/tools --recipes-path distro-builder/recipes qemu-deps`\n\
+Or install system qemu-img explicitly.",
+                path.display()
+            );
+        }
+        Err(err) => {
+            return Err(err).context("Failed to run qemu-img. Is QEMU installed?");
+        }
+    };
 
     if !status.success() {
         bail!("qemu-img create failed with status: {}", status);
     }
-
     Ok(())
 }
 
