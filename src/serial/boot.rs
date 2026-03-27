@@ -80,7 +80,7 @@ impl Console {
         let mut last_output_time = Instant::now();
         let mut last_console_nudge = Instant::now();
 
-        // Track what stage we're in for better error messages
+        // Track what phase we're in for better error messages
         let mut saw_uefi = false;
         let mut saw_bootloader = false;
         let mut saw_kernel = false;
@@ -100,7 +100,7 @@ impl Console {
             // STALL DETECTION: Only fail if no output for stall_timeout
             // This allows boot to take as long as needed while making progress
             if last_output_time.elapsed() > stall_timeout {
-                let stage = if saw_kernel {
+                let phase = if saw_kernel {
                     "Kernel started but init STALLED (no output)"
                 } else if saw_bootloader {
                     "Bootloader ran but kernel STALLED (no output)"
@@ -121,7 +121,7 @@ impl Console {
                     "BOOT STALLED: {}\n\
                      No output for {} seconds - system appears hung.\n\n\
                      Last output:\n{}",
-                    stage,
+                    phase,
                     stall_timeout.as_secs(),
                     context
                 );
@@ -187,7 +187,7 @@ impl Console {
                     last_output_time = Instant::now();
                     self.output_buffer.push(line.clone());
 
-                    // Track boot stage for better diagnostics
+                    // Track boot phase for better diagnostics
                     if line.contains("UEFI") || line.contains("BdsDxe") || line.contains("EFI") {
                         saw_uefi = true;
                     }

@@ -17,21 +17,21 @@ pub const FATAL_ERROR_PATTERNS: &[&str] = &[
 /// Critical boot error patterns - FAIL IMMEDIATELY when seen.
 /// These indicate the boot will never succeed.
 pub const CRITICAL_BOOT_ERRORS: &[&str] = &[
-    // === UEFI STAGE ===
+    // === UEFI PHASE ===
     "No bootable device",          // UEFI found nothing
     "Boot Failed",                 // UEFI boot failed
     "Default Boot Device Missing", // No default boot
     "Shell>",                      // Dropped to UEFI shell (no bootloader)
     "ASSERT_EFI_ERROR",            // UEFI assertion failed
     "map: Cannot find",            // UEFI can't find device
-    // === BOOTLOADER STAGE ===
+    // === BOOTLOADER PHASE ===
     "systemd-boot: Failed", // systemd-boot error
     "loader: Failed",       // Generic loader error
     "vmlinuz: not found",   // Kernel not on ESP
     "initramfs: not found", // Initramfs not on ESP
     "Error loading",        // Boot file load error
     "File not found",       // Missing boot file
-    // === KERNEL STAGE ===
+    // === KERNEL PHASE ===
     "Kernel panic",                 // Kernel panic
     "not syncing",                  // Panic continuation
     "VFS: Cannot open root device", // Root not found
@@ -41,7 +41,7 @@ pub const CRITICAL_BOOT_ERRORS: &[&str] = &[
     "No root device",               // Root device missing
     "SQUASHFS error",               // Squashfs corruption (legacy)
     "EROFS:",                       // EROFS filesystem error
-    // === INIT STAGE (critical) ===
+    // === INIT PHASE (critical) ===
     "emergency shell",              // Dropped to emergency
     "Emergency shell",              // Alternate casing
     "emergency.target",             // Systemd emergency
