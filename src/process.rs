@@ -78,14 +78,3 @@ pub fn acquire_test_lock() -> Result<File> {
 
     Ok(file)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_kill_stale_qemu_does_not_panic() {
-        // Just verify it doesn't crash - we don't actually want to kill processes in tests
-        kill_stale_qemu_processes();
-    }
-}

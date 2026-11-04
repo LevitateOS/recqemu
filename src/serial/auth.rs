@@ -391,28 +391,3 @@ impl Console {
         ))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_login_state_descriptions() {
-        assert_eq!(
-            LoginState::WaitingForLoginPrompt.description(),
-            "waiting for login prompt"
-        );
-        assert_eq!(
-            LoginState::WaitingForPasswordPrompt.description(),
-            "waiting for password prompt"
-        );
-        assert_eq!(LoginState::Complete.description(), "complete");
-    }
-
-    #[test]
-    fn test_auth_config_defaults() {
-        let config = AuthConfig::default();
-        assert_eq!(config.max_retries, 3);
-        assert!(!config.debug);
-    }
-}

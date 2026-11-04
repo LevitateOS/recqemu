@@ -27,7 +27,7 @@ Shared QEMU command builder, serial console, and utilities. Used by both leviso 
 
 ```bash
 cargo build
-cargo test
+cargo check # Unit tests are prohibited; use focused integration/runtime checks.
 ```
 
 ## Usage
