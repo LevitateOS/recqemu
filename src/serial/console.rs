@@ -1,20 +1,13 @@
-//! Console control for QEMU serial I/O.
-//!
-//! Handles command execution with exit code capture.
-//!
-//! # Overview
-//!
-//! - `exec()` / `exec_ok()` - Run commands with exit code capture
-//! - `exec_chroot()` - Run commands in chroot via recchroot
-//! - `wait_for_boot_with_patterns()` - Wait for boot with configurable patterns
-//! - `write_file()` - Write files via serial console
+//! The serial console of a QEMU guest: lines in, text out, with a transcript.
 
-use anyhow::{Context, Result};
-use std::io::BufRead;
-use std::io::BufReader;
+use anyhow::{bail, Context, Result};
 use std::io::{Read, Write};
-use std::process::{Child, ChildStdin, ChildStdout};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::process::Child;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::time::Duration;
+
+/// How many transcript lines an error shows.
+pub(crate) const CONTEXT_LINES: usize = 30;
 
 /// Result of executing a command in QEMU.
 #[derive(Debug)]
@@ -27,105 +20,127 @@ pub struct CommandResult {
     pub output: String,
     /// Whether execution was aborted due to fatal error pattern.
     pub aborted_on_error: bool,
-    /// Whether execution was aborted due to stall (no output).
-    pub stalled: bool,
 }
 
 impl CommandResult {
     /// Check if the command succeeded.
     pub fn success(&self) -> bool {
-        self.completed && self.exit_code == 0 && !self.aborted_on_error && !self.stalled
+        self.completed && self.exit_code == 0 && !self.aborted_on_error
     }
 }
 
-/// Console controller for QEMU serial I/O.
+/// Console controller for QEMU serial I/O (`-serial mon:stdio`, piped).
 pub struct Console {
-    pub(crate) stdin: ChildStdin,
-    pub(crate) rx: Receiver<String>,
-    /// Output buffer for all received lines.
-    pub(crate) output_buffer: Vec<String>,
+    stdin: std::process::ChildStdin,
+    rx: Receiver<String>,
+    /// Every line received, for diagnostics.
+    transcript: Vec<String>,
     /// Services that failed during boot (tracked for diagnostics).
     pub(crate) failed_services: Vec<String>,
 }
 
 impl Console {
-    /// Create a new Console from a spawned QEMU process.
+    /// Take over a QEMU process spawned with piped stdin/stdout.
     pub fn new(child: &mut Child) -> Result<Self> {
         let stdin = child.stdin.take().context("Failed to get QEMU stdin")?;
         let stdout = child.stdout.take().context("Failed to get QEMU stdout")?;
-
-        // Spawn reader thread
-        let (tx, rx) = mpsc::channel();
+        let (chunk_tx, chunk_rx) = mpsc::channel::<Vec<u8>>();
         std::thread::spawn(move || {
-            Self::reader_thread(stdout, tx);
+            let mut stdout = stdout;
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = stdout.read(&mut buf) {
+                if n == 0 || chunk_tx.send(buf[..n].to_vec()).is_err() {
+                    break;
+                }
+            }
         });
-
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || assemble_lines(chunk_rx, tx));
         Ok(Self {
             stdin,
             rx,
-            output_buffer: Vec::new(),
+            transcript: Vec::new(),
             failed_services: Vec::new(),
         })
     }
 
-    fn reader_thread(stdout: ChildStdout, tx: Sender<String>) {
-        let reader = BufReader::new(stdout);
-        for line in reader.lines().map_while(Result::ok) {
-            if tx.send(line).is_err() {
-                break;
+    /// The next line within `timeout` (`None` on timeout); every line goes
+    /// into the transcript. Fails when QEMU's output closed.
+    pub(crate) fn recv_line(&mut self, timeout: Duration) -> Result<Option<String>> {
+        match self.rx.recv_timeout(timeout) {
+            Ok(line) => {
+                self.transcript.push(line.clone());
+                Ok(Some(line))
             }
+            Err(RecvTimeoutError::Timeout) => Ok(None),
+            Err(RecvTimeoutError::Disconnected) => bail!(
+                "QEMU serial output closed (process died?)\n\nLast output:\n{}",
+                self.tail()
+            ),
         }
     }
 
-    /// Replay currently buffered output lines to host stdout.
-    pub fn replay_output_buffer(&self) -> Result<()> {
-        let mut host_stdout = std::io::stdout().lock();
-        for line in &self.output_buffer {
-            writeln!(host_stdout, "{}", line)?;
-        }
-        host_stdout.flush()?;
+    /// Type `text` into the guest.
+    pub(crate) fn send(&mut self, text: &str) -> Result<()> {
+        self.stdin.write_all(text.as_bytes())?;
+        self.stdin.flush()?;
         Ok(())
     }
 
-    /// Attach host stdio to the guest serial console.
-    ///
-    /// This is intended for interactive debugging once automated setup has
-    /// completed. It will:
-    /// - Print all subsequent guest output to host stdout
-    /// - Forward host stdin bytes to the guest (so Ctrl+A, then X exits QEMU
-    ///   when using `-serial mon:stdio`)
-    ///
-    /// This consumes the `Console` and returns when QEMU exits (or its stdout
-    /// closes).
-    pub fn attach_stdio(self) -> Result<()> {
-        let Console { mut stdin, rx, .. } = self;
+    /// The last [`CONTEXT_LINES`] lines received.
+    pub(crate) fn tail(&self) -> String {
+        let start = self.transcript.len().saturating_sub(CONTEXT_LINES);
+        self.transcript[start..].join("\n")
+    }
 
-        // Forward host stdin -> guest stdin (best-effort).
-        // We intentionally don't join this thread; it may block waiting for user input.
-        std::thread::spawn(move || {
-            let mut host_stdin = std::io::stdin().lock();
-            let mut buf = [0u8; 1024];
-            loop {
-                match host_stdin.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if stdin.write_all(&buf[..n]).is_err() {
-                            break;
-                        }
-                        let _ = stdin.flush();
-                    }
-                    Err(_) => break,
+    /// Get any failed services that were observed during boot.
+    pub fn failed_services(&self) -> &[String] {
+        &self.failed_services
+    }
+}
+
+/// How long a line without its newline waits before it is delivered anyway:
+/// prompts (`login: `, `Password: `) end without one.
+const PARTIAL_LINE_DELAY: Duration = Duration::from_millis(100);
+
+/// Turn raw output into lines; a trailing partial line is delivered once the
+/// output has been quiet for [`PARTIAL_LINE_DELAY`].
+fn assemble_lines(chunks: Receiver<Vec<u8>>, lines: Sender<String>) {
+    let mut pending: Vec<u8> = Vec::new();
+    loop {
+        let closed = match chunks.recv_timeout(PARTIAL_LINE_DELAY) {
+            Ok(chunk) => {
+                pending.extend_from_slice(&chunk);
+                false
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                if pending.is_empty() {
+                    continue;
                 }
+                true
             }
-        });
-
-        // Forward guest stdout -> host stdout.
-        let mut host_stdout = std::io::stdout().lock();
-        while let Ok(line) = rx.recv() {
-            writeln!(host_stdout, "{}", line)?;
-            host_stdout.flush()?;
+            Err(RecvTimeoutError::Disconnected) => {
+                if !pending.is_empty() {
+                    let _ = lines.send(line_text(&pending));
+                }
+                return;
+            }
+        };
+        while let Some(end) = pending.iter().position(|b| *b == b'\n') {
+            let line: Vec<u8> = pending.drain(..=end).collect();
+            if lines.send(line_text(&line[..end])).is_err() {
+                return;
+            }
         }
-
-        Ok(())
+        if closed && !pending.is_empty() {
+            if lines.send(line_text(&pending)).is_err() {
+                return;
+            }
+            pending.clear();
+        }
     }
+}
+
+fn line_text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).trim_end_matches('\r').to_string()
 }

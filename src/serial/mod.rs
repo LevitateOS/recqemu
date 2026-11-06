@@ -1,25 +1,17 @@
 //! Serial console backend for QEMU.
 //!
-//! This module provides serial I/O for command execution with exit code capture.
-//!
-//! # Overview
-//!
-//! - `Console` - Serial I/O with command execution and exit code capture
-//! - `exec()` / `exec_ok()` - Run commands with exit code capture
-//! - `exec_chroot()` - Run commands in chroot via recchroot
-//! - `wait_for_boot_with_patterns()` - Wait for boot with configurable patterns
-//! - `write_file()` - Write files via serial console
-//! - `login()` - Authentication subsystem (login, shell markers)
+//! - `Console` - serial I/O with a transcript
+//! - `exec()` / `exec_ok()` - run commands with exit code capture
+//! - `wait_for_boot_with_patterns()` - wait for boot with configurable patterns
+//! - `login()` - serial getty login
+//! - `protocol` - the markers and the guest profile script both sides share
 
 mod ansi;
 mod auth;
 mod boot;
-mod chroot;
 mod console;
 mod exec;
-mod sync;
-mod utils;
+pub mod protocol;
 
-pub use console::{CommandResult, Console};
 pub use ansi::strip_ansi_codes;
-pub use sync::{generate_command_markers, is_marker_line};
+pub use console::{CommandResult, Console};

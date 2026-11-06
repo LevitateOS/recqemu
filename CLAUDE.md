@@ -11,7 +11,8 @@ The one QEMU command builder, plus serial console and utilities. Used by xtask (
 - `create_disk()` - qcow2 disk creation
 - `kvm_available()` - KVM detection
 - `patterns` - Boot/error pattern constants
-- `serial` - Serial console I/O (Console, exec, auth, boot)
+- `serial` - Serial console I/O (Console, exec, login, boot wait)
+- `serial::protocol` - the serial test protocol and the guest profile script (`guest/serial-test.sh`) that live overlays install
 
 ## What Does NOT Belong Here
 
@@ -31,7 +32,8 @@ cargo check # Unit tests are prohibited; use focused integration/runtime checks.
 ## Usage
 
 ```rust
-use recqemu::{QemuBuilder, Console, find_ovmf, create_disk};
+use recqemu::{QemuBuilder, find_ovmf, create_disk};
+use recqemu::serial::Console;
 
 // Create a disk
 create_disk(Path::new("disk.qcow2"), "20G")?;
@@ -48,7 +50,7 @@ let mut cmd = QemuBuilder::new()
 // Spawn and control via serial
 let mut child = cmd.spawn()?;
 let mut console = Console::new(&mut child)?;
-console.wait_for_boot(Duration::from_secs(90))?;
+console.wait_for_boot_with_patterns(Duration::from_secs(90), &[SHELL_READY_MARKER], &errors, false)?;
 console.exec_ok("ls -la", Duration::from_secs(10))?;
 ```
 

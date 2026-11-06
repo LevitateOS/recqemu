@@ -80,6 +80,15 @@ error — else the Fedora, Debian/Ubuntu, Arch and NixOS package locations in
 - Creates qcow2 disks with qemu-img
 - Detects KVM availability
 
+## Serial test protocol
+
+`serial::protocol` and `guest/serial-test.sh` are the two sides of it: the
+guest script (installed as a profile.d script by the live overlays) turns echo
+off on the serial console, empties the prompt and prints `SHELL_READY_MARKER`;
+`Console::exec` wraps each command in unique `printf`-printed markers and reads
+its exit status, and `Console::login` drives getty and confirms the shell
+with a marker probe.
+
 ## What It Does NOT Do
 
 - Run QEMU (returns `Command` for you to run)

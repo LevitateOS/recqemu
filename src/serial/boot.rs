@@ -4,72 +4,18 @@
 //! and fail-fast error pattern matching.
 
 use anyhow::{bail, Result};
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use super::console::Console;
-use crate::patterns::{BOOT_ERROR_PATTERNS, CRITICAL_BOOT_ERRORS, SERVICE_FAILURE_PATTERNS};
+use crate::patterns::SERVICE_FAILURE_PATTERNS;
 
 impl Console {
-    /// Wait for the system to boot with default LevitateOS patterns.
+    /// Wait for boot until a success pattern appears, failing on an error
+    /// pattern or when the console stays silent for `stall_timeout` (boot
+    /// may take as long as it keeps printing).
     ///
-    /// FAIL FAST DESIGN with STALL DETECTION:
-    /// - Detect failure patterns IMMEDIATELY and bail
-    /// - Detect success patterns IMMEDIATELY and return
-    /// - Stall timeout only triggers if NO OUTPUT for N seconds
-    /// - Boot can take as long as it needs as long as progress is being made
-    #[allow(dead_code)]
-    pub fn wait_for_boot(&mut self, stall_timeout: Duration) -> Result<()> {
-        self.wait_for_boot_with_patterns(
-            stall_timeout,
-            // Success pattern for live ISO boot
-            // FAIL FAST: Only accept ___SHELL_READY___ from 00-levitate-test.sh
-            // No fallbacks - if instrumentation is broken, test must fail immediately
-            &["___SHELL_READY___"],
-            // Error patterns (shared)
-            BOOT_ERROR_PATTERNS,
-            false, // Don't track service failures, fail immediately
-        )
-    }
-
-    /// Wait for installed system to boot with default LevitateOS patterns.
-    ///
-    /// Unlike live ISO boot, this tracks service failures instead of immediately
-    /// bailing, allowing us to login and capture diagnostic information.
-    #[allow(dead_code)]
-    pub fn wait_for_installed_boot(&mut self, stall_timeout: Duration) -> Result<()> {
-        self.wait_for_boot_with_patterns(
-            stall_timeout,
-            // Success patterns for installed system boot
-            // Unlike live ISO which has autologin, installed system requires login
-            // Use "levitateos login:" to avoid matching "Login Prompts" in systemd output
-            // After login, shell emits ___SHELL_READY___ for command execution
-            // Also accept multi-user.target - proves system booted successfully even if
-            // serial console login prompt has issues (VT emulation quirks in QEMU)
-            &[
-                "___SHELL_READY___",
-                "levitateos login:",
-                "multi-user.target",
-            ],
-            // Only critical errors - service failures are tracked separately
-            CRITICAL_BOOT_ERRORS,
-            true, // Track service failures for later diagnostic capture
-        )
-    }
-
-    /// Get any failed services that were observed during boot.
-    pub fn failed_services(&self) -> &[String] {
-        &self.failed_services
-    }
-
-    /// Core boot waiting logic with configurable patterns.
-    ///
-    /// Uses STALL DETECTION: only fails if no output for `stall_timeout`.
-    /// Boot can take as long as it needs as long as it's making progress.
-    ///
-    /// If `track_service_failures` is true, service failures are tracked in
-    /// `self.failed_services` instead of causing immediate failure. This allows
-    /// capturing diagnostics after boot completes.
+    /// With `track_service_failures`, service failures are recorded in
+    /// [`Console::failed_services`] for later diagnostics instead of failing.
     pub fn wait_for_boot_with_patterns(
         &mut self,
         stall_timeout: Duration,
@@ -77,29 +23,21 @@ impl Console {
         error_patterns: &[&str],
         track_service_failures: bool,
     ) -> Result<()> {
-        let mut last_output_time = Instant::now();
-        let mut last_console_nudge = Instant::now();
-
-        // Track what phase we're in for better error messages
+        let mut last_output = Instant::now();
+        let mut last_nudge = Instant::now();
         let mut saw_uefi = false;
         let mut saw_bootloader = false;
         let mut saw_kernel = false;
-
-        // Clear any previously tracked service failures
         self.failed_services.clear();
 
         loop {
-            // Nudge serial console after kernel boot so getty/login surfaces that
-            // require input become visible on headless OpenRC paths.
-            if saw_kernel && last_console_nudge.elapsed() >= Duration::from_secs(3) {
-                let _ = std::io::Write::write_all(&mut self.stdin, b"\n");
-                let _ = std::io::Write::flush(&mut self.stdin);
-                last_console_nudge = Instant::now();
+            // Nudge the serial console after the kernel started so getty
+            // prompts that wait for input appear (headless OpenRC).
+            if saw_kernel && last_nudge.elapsed() >= Duration::from_secs(3) {
+                self.send("\n")?;
+                last_nudge = Instant::now();
             }
-
-            // STALL DETECTION: Only fail if no output for stall_timeout
-            // This allows boot to take as long as needed while making progress
-            if last_output_time.elapsed() > stall_timeout {
+            if last_output.elapsed() > stall_timeout {
                 let phase = if saw_kernel {
                     "Kernel started but init STALLED (no output)"
                 } else if saw_bootloader {
@@ -109,150 +47,34 @@ impl Console {
                 } else {
                     "No output received - QEMU or serial broken"
                 };
-
-                let last_lines: Vec<_> = self.output_buffer.iter().rev().take(30).collect();
-                let context = last_lines
-                    .into_iter()
-                    .rev()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join("\n");
                 bail!(
-                    "BOOT STALLED: {}\n\
-                     No output for {} seconds - system appears hung.\n\n\
-                     Last output:\n{}",
-                    phase,
+                    "BOOT STALLED: {phase}\nNo output for {} seconds - system appears hung.\n\nLast output:\n{}",
                     stall_timeout.as_secs(),
-                    context
+                    self.tail()
                 );
             }
 
-            // Drain any buffered output before blocking.
-            // QEMU's stdout may have multiple lines buffered that try_recv()
-            // can pick up immediately, avoiding missed output between polls.
-            while let Ok(line) = self.rx.try_recv() {
-                last_output_time = Instant::now();
-                self.output_buffer.push(line.clone());
+            let Some(line) = self.recv_line(Duration::from_millis(500))? else {
+                continue;
+            };
+            last_output = Instant::now();
+            saw_uefi |= line.contains("UEFI") || line.contains("BdsDxe") || line.contains("EFI");
+            saw_bootloader |= line.contains("systemd-boot")
+                || line.contains("Loading Linux")
+                || line.contains("loader");
+            saw_kernel |= line.contains("Linux version")
+                || line.contains("Booting Linux")
+                || line.contains("KASLR");
 
-                if line.contains("UEFI") || line.contains("BdsDxe") || line.contains("EFI") {
-                    saw_uefi = true;
-                }
-                if line.contains("systemd-boot")
-                    || line.contains("Loading Linux")
-                    || line.contains("loader")
-                {
-                    saw_bootloader = true;
-                }
-                if line.contains("Linux version")
-                    || line.contains("Booting Linux")
-                    || line.contains("KASLR")
-                {
-                    saw_kernel = true;
-                }
-
-                if track_service_failures {
-                    for pattern in SERVICE_FAILURE_PATTERNS {
-                        if line.contains(pattern) {
-                            self.failed_services.push(line.clone());
-                            eprintln!("  WARN: Service failure observed: {}", line.trim());
-                            break;
-                        }
-                    }
-                }
-
-                for pattern in error_patterns {
-                    if line.contains(pattern) {
-                        let last_lines: Vec<_> = self.output_buffer.iter().rev().take(30).collect();
-                        let context = last_lines
-                            .into_iter()
-                            .rev()
-                            .cloned()
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        bail!("Boot failed: {}\n\nContext:\n{}", pattern, context);
-                    }
-                }
-
-                for pattern in success_patterns {
-                    if line.contains(pattern) {
-                        std::thread::sleep(Duration::from_millis(500));
-                        return Ok(());
-                    }
-                }
+            if track_service_failures && SERVICE_FAILURE_PATTERNS.iter().any(|p| line.contains(p)) {
+                eprintln!("  WARN: Service failure observed: {}", line.trim());
+                self.failed_services.push(line.clone());
             }
-
-            match self.rx.recv_timeout(Duration::from_millis(500)) {
-                Ok(line) => {
-                    // Got output - reset stall timer
-                    last_output_time = Instant::now();
-                    self.output_buffer.push(line.clone());
-
-                    // Track boot phase for better diagnostics
-                    if line.contains("UEFI") || line.contains("BdsDxe") || line.contains("EFI") {
-                        saw_uefi = true;
-                    }
-                    if line.contains("systemd-boot")
-                        || line.contains("Loading Linux")
-                        || line.contains("loader")
-                    {
-                        saw_bootloader = true;
-                    }
-                    if line.contains("Linux version")
-                        || line.contains("Booting Linux")
-                        || line.contains("KASLR")
-                    {
-                        saw_kernel = true;
-                    }
-
-                    // Track service failures if enabled
-                    if track_service_failures {
-                        for pattern in SERVICE_FAILURE_PATTERNS {
-                            if line.contains(pattern) {
-                                // Extract the service name from lines like:
-                                // "[FAILED] Failed to start sshd.service - OpenSSH server daemon."
-                                // "Starting sshd.service..." followed by failure
-                                self.failed_services.push(line.clone());
-                                eprintln!("  WARN: Service failure observed: {}", line.trim());
-                                break;
-                            }
-                        }
-                    }
-
-                    // FAIL FAST: Check error patterns FIRST
-                    for pattern in error_patterns {
-                        if line.contains(pattern) {
-                            let last_lines: Vec<_> =
-                                self.output_buffer.iter().rev().take(30).collect();
-                            let context = last_lines
-                                .into_iter()
-                                .rev()
-                                .cloned()
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                            bail!("Boot failed: {}\n\nContext:\n{}", pattern, context);
-                        }
-                    }
-
-                    // Check success patterns
-                    for pattern in success_patterns {
-                        if line.contains(pattern) {
-                            // Small settle time for system to be ready
-                            std::thread::sleep(Duration::from_millis(500));
-                            return Ok(());
-                        }
-                    }
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    let last_lines: Vec<_> = self.output_buffer.iter().rev().take(20).collect();
-                    let context = last_lines
-                        .into_iter()
-                        .rev()
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    bail!("QEMU process died\n\nLast output:\n{}", context);
-                }
+            if let Some(pattern) = error_patterns.iter().find(|p| line.contains(*p)) {
+                bail!("Boot failed: {pattern}\n\nContext:\n{}", self.tail());
+            }
+            if success_patterns.iter().any(|p| line.contains(p)) {
+                return Ok(());
             }
         }
     }
