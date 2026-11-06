@@ -122,7 +122,7 @@ impl QemuBuilder {
 
     /// Also attach the CD-ROM image as a read-only disk, so the guest kernel
     /// sees the partitions appended to a hybrid ISO (where the LevitateOS
-    /// live payloads can live; see `distro_spec::shared::live_boot`).
+    /// live payloads can live; see `recinit::live`).
     pub fn cdrom_as_disk(mut self) -> Self {
         self.cdrom_as_disk = true;
         self
