@@ -72,6 +72,9 @@ struct FwCfgFile {
 /// The host address user-mode networking forwards guest ports on.
 pub const HOSTFWD_ADDRESS: &str = "127.0.0.1";
 
+/// The guest's sshd port, which SSH forwards point at.
+pub const GUEST_SSH_PORT: u16 = 22;
+
 impl Default for QemuBuilder {
     fn default() -> Self {
         Self::new()
