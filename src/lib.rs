@@ -1,7 +1,7 @@
 //! recqemu - QEMU command builder and utilities.
 //!
 //! The one place QEMU command lines are assembled, for development boots
-//! (`cargo xtask scenarios boot`) and the install tests.
+//! (`cargo xtask run`) and the install tests.
 //!
 //! # Example
 //!

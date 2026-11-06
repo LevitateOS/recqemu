@@ -107,7 +107,7 @@ cargo build --release
 
 ## Consumers
 
-- `xtask` - `cargo xtask scenarios boot`
+- `xtask` - `cargo xtask run`
 - `install-tests` - E2E testing
 
 ## License
