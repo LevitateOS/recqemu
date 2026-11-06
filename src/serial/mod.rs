@@ -21,4 +21,5 @@ mod sync;
 mod utils;
 
 pub use console::{CommandResult, Console};
+pub use ansi::strip_ansi_codes;
 pub use sync::{generate_command_markers, is_marker_line};

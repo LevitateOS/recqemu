@@ -18,13 +18,11 @@ create_disk(Path::new("disk.qcow2"), "20G")?;
 
 // Build QEMU command
 let mut cmd = QemuBuilder::new()
-    .memory("4G")
-    .smp(4)
     .cdrom("/path/to/iso")
     .disk("/path/to/disk.qcow2")
-    .uefi(find_ovmf().unwrap())
+    .uefi(find_ovmf()?)
     .user_network()
-    .build_interactive();
+    .build();
 
 cmd.status()?;
 ```
@@ -36,31 +34,29 @@ cmd.status()?;
 Fluent builder for QEMU commands:
 
 ```rust
-QemuBuilder::new()
-    .memory("4G")              // RAM size
-    .smp(4)                    // CPU cores
+QemuBuilder::new()              // 4G, 4 CPUs, KVM when /dev/kvm exists
     .cdrom(path)               // ISO via virtio-scsi
-    .disk(path)                // Disk via virtio-blk
+    .cdrom_as_disk()           // also expose the ISO's appended partitions
+    .extra_cdrom(path)         // another read-only CD
+    .disk(path)                // Disk via virtio-blk (qcow2/raw detected)
     .uefi(ovmf_path)           // UEFI boot with OVMF
     .uefi_vars(vars_path)      // Writable UEFI vars
     .user_network()            // QEMU user networking
     .display("gtk,gl=on")      // Display backend
     .vga("virtio")             // VGA adapter
-    .serial_stdio()            // Serial to stdout
-    .serial_file(path)         // Serial to file
+    .serial_stdio()            // Serial to stdout (or .serial_file(path))
     .nographic()               // Headless mode
     .no_reboot()               // Exit on reboot
     .build()                   // Get Command
-    .build_interactive()       // stdin/stdout inherited
-    .build_piped()             // stdin/stdout piped
+    .build_piped()             // stdin/stdout piped, for Console
 ```
 
 ### Utilities
 
 ```rust
 // Find OVMF firmware
-let ovmf = find_ovmf();           // Returns Option<PathBuf>
-let vars = find_ovmf_vars();      // Returns Option<PathBuf>
+let ovmf = find_ovmf()?;          // OVMF_PATH, else distro package paths
+let vars = find_ovmf_vars()?;     // OVMF_VARS_PATH, else the VARS file next to it
 
 // Create qcow2 disk
 create_disk(Path::new("disk.qcow2"), "20G")?;
@@ -73,10 +69,9 @@ if kvm_available() {
 
 ## OVMF Search Paths
 
-Searches in order:
-- `/usr/share/edk2/ovmf/OVMF_CODE.fd` (Fedora)
-- `/usr/share/OVMF/OVMF_CODE.fd` (Debian/Ubuntu)
-- `/usr/share/ovmf/x64/OVMF_CODE.fd` (Arch)
+`OVMF_PATH` (and `OVMF_VARS_PATH`) when set — a path that is not a file is an
+error — else the Fedora, Debian/Ubuntu, Arch and NixOS package locations in
+`OVMF_FILES` in `src/lib.rs`.
 
 ## What It Does
 
@@ -88,9 +83,7 @@ Searches in order:
 ## What It Does NOT Do
 
 - Run QEMU (returns `Command` for you to run)
-- Handle serial console I/O (see install-tests)
 - Implement QMP protocol (see install-tests)
-- Manage test coordination/locking
 
 ## Requirements
 
@@ -105,8 +98,8 @@ cargo build --release
 
 ## Consumers
 
-- `leviso` - `run_iso()` and `test_iso()` commands
-- `install-tests` - E2E testing (wraps and adds anti-cheat)
+- `xtask` - `cargo xtask scenarios boot`
+- `install-tests` - E2E testing
 
 ## License
 

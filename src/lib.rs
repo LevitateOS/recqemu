@@ -1,29 +1,23 @@
 //! recqemu - QEMU command builder and utilities.
 //!
-//! Provides shared QEMU infrastructure for both development (`leviso run`)
-//! and testing (`install-tests`).
+//! The one place QEMU command lines are assembled, for development boots
+//! (`cargo xtask scenarios boot`) and the install tests.
 //!
 //! # Example
 //!
 //! ```ignore
 //! use recqemu::{QemuBuilder, find_ovmf, create_disk};
 //!
-//! // Create a disk
 //! create_disk(Path::new("disk.qcow2"), "20G")?;
-//!
-//! // Build QEMU command
 //! let mut cmd = QemuBuilder::new()
-//!     .memory("4G")
 //!     .cdrom(iso_path)
 //!     .disk(disk_path)
-//!     .uefi(find_ovmf().unwrap())
+//!     .uefi(find_ovmf()?)
 //!     .build();
-//!
 //! cmd.status()?;
 //! ```
 
 pub mod patterns;
-pub mod process;
 pub mod serial;
 
 pub use serial::{CommandResult, Console};
@@ -38,36 +32,39 @@ pub const DEFAULT_MEMORY: &str = "4G";
 /// Default CPU count.
 pub const DEFAULT_SMP: u32 = 4;
 
-/// Default disk size for new VMs.
-pub const DEFAULT_DISK_SIZE: &str = "20G";
+/// Where the guest's serial port goes.
+#[derive(Clone, Debug)]
+pub enum Serial {
+    /// Multiplexed with the QEMU monitor on stdio.
+    Stdio,
+    /// Appended to a file.
+    File(PathBuf),
+}
 
 /// Builder for QEMU commands.
 ///
 /// Provides a fluent API for constructing QEMU command lines with
 /// sensible defaults for UEFI boot testing.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct QemuBuilder {
-    memory: Option<String>,
-    smp: Option<u32>,
-    cpu: Option<String>,
-    kernel: Option<PathBuf>,
-    initrd: Option<PathBuf>,
-    append: Option<String>,
+    program: PathBuf,
     cdrom: Option<PathBuf>,
+    cdrom_as_disk: bool,
     extra_cdroms: Vec<PathBuf>,
     disk: Option<PathBuf>,
     ovmf_code: Option<PathBuf>,
     ovmf_vars: Option<PathBuf>,
     boot_order: Option<String>,
     nographic: bool,
-    serial_stdio: bool,
-    serial_file: Option<PathBuf>,
+    serial: Option<Serial>,
     no_reboot: bool,
     enable_kvm: bool,
     user_network: bool,
     user_network_hostfwd: Vec<(u16, u16)>,
     vga: Option<String>,
     display: Option<String>,
+    devices: Vec<String>,
+    no_monitor: bool,
     qmp_socket: Option<PathBuf>,
     vnc_display: Option<u16>,
     nodefaults: bool,
@@ -80,48 +77,47 @@ struct FwCfgFile {
     path: PathBuf,
 }
 
+/// The host address user-mode networking forwards guest ports on.
+pub const HOSTFWD_ADDRESS: &str = "127.0.0.1";
+
+impl Default for QemuBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl QemuBuilder {
-    /// Create a new QEMU builder with sensible defaults.
+    /// A builder for `qemu-system-x86_64`, using KVM when `/dev/kvm` exists.
     pub fn new() -> Self {
         Self {
-            enable_kvm: Path::new("/dev/kvm").exists(),
-            ..Default::default()
+            program: PathBuf::from("qemu-system-x86_64"),
+            cdrom: None,
+            cdrom_as_disk: false,
+            extra_cdroms: Vec::new(),
+            disk: None,
+            ovmf_code: None,
+            ovmf_vars: None,
+            boot_order: None,
+            nographic: false,
+            serial: None,
+            no_reboot: false,
+            enable_kvm: kvm_available(),
+            user_network: false,
+            user_network_hostfwd: Vec::new(),
+            vga: None,
+            display: None,
+            devices: Vec::new(),
+            no_monitor: false,
+            qmp_socket: None,
+            vnc_display: None,
+            nodefaults: false,
+            fw_cfg_files: Vec::new(),
         }
     }
 
-    /// Set memory size (e.g., "4G", "2048M").
-    pub fn memory(mut self, size: &str) -> Self {
-        self.memory = Some(size.to_string());
-        self
-    }
-
-    /// Set number of CPU cores.
-    pub fn smp(mut self, cores: u32) -> Self {
-        self.smp = Some(cores);
-        self
-    }
-
-    /// Set CPU model (e.g., "host", "Skylake-Client").
-    pub fn cpu(mut self, model: &str) -> Self {
-        self.cpu = Some(model.to_string());
-        self
-    }
-
-    /// Set kernel for direct boot (bypasses bootloader).
-    pub fn kernel(mut self, path: impl Into<PathBuf>) -> Self {
-        self.kernel = Some(path.into());
-        self
-    }
-
-    /// Set initrd for direct boot.
-    pub fn initrd(mut self, path: impl Into<PathBuf>) -> Self {
-        self.initrd = Some(path.into());
-        self
-    }
-
-    /// Set kernel command line for direct boot.
-    pub fn append(mut self, cmdline: &str) -> Self {
-        self.append = Some(cmdline.to_string());
+    /// Run this QEMU binary instead of `qemu-system-x86_64` from PATH.
+    pub fn program(mut self, path: impl Into<PathBuf>) -> Self {
+        self.program = path.into();
         self
     }
 
@@ -131,13 +127,21 @@ impl QemuBuilder {
         self
     }
 
+    /// Also attach the CD-ROM image as a read-only disk, so the guest kernel
+    /// sees the partitions appended to a hybrid ISO (where the LevitateOS
+    /// live payloads can live; see `distro_spec::shared::live_boot`).
+    pub fn cdrom_as_disk(mut self) -> Self {
+        self.cdrom_as_disk = true;
+        self
+    }
+
     /// Add an additional read-only CD-ROM image.
     pub fn extra_cdrom(mut self, path: impl Into<PathBuf>) -> Self {
         self.extra_cdroms.push(path.into());
         self
     }
 
-    /// Add virtio disk.
+    /// Add a virtio disk; its format (qcow2 or raw) is read from the image.
     pub fn disk(mut self, path: impl Into<PathBuf>) -> Self {
         self.disk = Some(path.into());
         self
@@ -167,15 +171,15 @@ impl QemuBuilder {
         self
     }
 
-    /// Send serial output to stdio.
+    /// Send serial output to stdio (with the monitor).
     pub fn serial_stdio(mut self) -> Self {
-        self.serial_stdio = true;
+        self.serial = Some(Serial::Stdio);
         self
     }
 
     /// Send serial output to file.
     pub fn serial_file(mut self, path: impl Into<PathBuf>) -> Self {
-        self.serial_file = Some(path.into());
+        self.serial = Some(Serial::File(path.into()));
         self
     }
 
@@ -185,34 +189,41 @@ impl QemuBuilder {
         self
     }
 
-    /// Explicitly enable/disable KVM.
-    pub fn kvm(mut self, enable: bool) -> Self {
-        self.enable_kvm = enable;
-        self
-    }
-
     /// Enable user-mode networking (DHCP, NAT).
     pub fn user_network(mut self) -> Self {
         self.user_network = true;
         self
     }
 
-    /// Enable user networking with host TCP forward to guest TCP.
+    /// Enable user networking with a forward from `HOSTFWD_ADDRESS:host_port`
+    /// to the guest's TCP `guest_port`.
     pub fn user_network_with_hostfwd(mut self, host_port: u16, guest_port: u16) -> Self {
         self.user_network = true;
         self.user_network_hostfwd.push((host_port, guest_port));
         self
     }
 
-    /// Set VGA adapter type (e.g., "std", "virtio").
+    /// Set VGA adapter type (e.g., "std", "virtio", "none").
     pub fn vga(mut self, vga_type: &str) -> Self {
         self.vga = Some(vga_type.to_string());
         self
     }
 
-    /// Set display type (e.g., "gtk,gl=on", "none").
+    /// Set display type (e.g., "gtk,gl=on", "vnc=:1").
     pub fn display(mut self, display: &str) -> Self {
         self.display = Some(display.to_string());
+        self
+    }
+
+    /// Add a device (`-device <spec>`).
+    pub fn device(mut self, spec: &str) -> Self {
+        self.devices.push(spec.to_string());
+        self
+    }
+
+    /// Run without the QEMU monitor.
+    pub fn no_monitor(mut self) -> Self {
+        self.no_monitor = true;
         self
     }
 
@@ -248,92 +259,54 @@ impl QemuBuilder {
 
     /// Build the QEMU command.
     pub fn build(self) -> Command {
-        let mut cmd = Command::new("qemu-system-x86_64");
+        let mut cmd = Command::new(&self.program);
 
-        // No defaults if requested
         if self.nodefaults {
             cmd.arg("-nodefaults");
         }
-
-        // KVM acceleration
         if self.enable_kvm {
-            cmd.arg("-enable-kvm");
-        }
-
-        // CPU
-        if let Some(cpu) = &self.cpu {
-            cmd.args(["-cpu", cpu]);
-        } else if self.enable_kvm {
-            cmd.args(["-cpu", "host"]);
+            cmd.args(["-enable-kvm", "-cpu", "host"]);
         } else {
             cmd.args(["-cpu", "qemu64"]);
         }
+        cmd.args(["-smp", &DEFAULT_SMP.to_string()]);
+        cmd.args(["-m", DEFAULT_MEMORY]);
 
-        // SMP
-        let smp = self.smp.unwrap_or(DEFAULT_SMP);
-        cmd.args(["-smp", &smp.to_string()]);
-
-        // Memory
-        let memory = self.memory.as_deref().unwrap_or(DEFAULT_MEMORY);
-        cmd.args(["-m", memory]);
-
-        // Direct kernel boot
-        if let Some(kernel) = &self.kernel {
-            cmd.args(["-kernel", &kernel.to_string_lossy()]);
-        }
-        if let Some(initrd) = &self.initrd {
-            cmd.args(["-initrd", &initrd.to_string_lossy()]);
-        }
-        if let Some(append) = &self.append {
-            cmd.args(["-append", append]);
-        }
-
-        // CD-ROM via virtio-scsi
+        // Read-only images on virtio-scsi, one controller each.
+        let mut scsi = 0usize;
+        let mut attach_scsi = |cmd: &mut Command, kind: &str, file: &Path| {
+            cmd.arg("-device")
+                .arg(format!("virtio-scsi-pci,id=scsi{scsi}"))
+                .arg("-device")
+                .arg(format!("{kind},drive=ro{scsi},bus=scsi{scsi}.0"))
+                .arg("-drive")
+                .arg(format!(
+                    "id=ro{scsi},if=none,format=raw,readonly=on,file={}",
+                    file.display()
+                ));
+            scsi += 1;
+        };
         if let Some(cdrom) = &self.cdrom {
+            attach_scsi(&mut cmd, "scsi-cd", cdrom);
+            if self.cdrom_as_disk {
+                attach_scsi(&mut cmd, "scsi-hd", cdrom);
+            }
+        }
+        for cdrom in &self.extra_cdroms {
+            attach_scsi(&mut cmd, "scsi-cd", cdrom);
+        }
+
+        if let Some(disk) = &self.disk {
             cmd.args([
-                "-device",
-                "virtio-scsi-pci,id=scsi0",
-                "-device",
-                "scsi-cd,drive=cdrom0,bus=scsi0.0",
                 "-drive",
                 &format!(
-                    "id=cdrom0,if=none,format=raw,readonly=on,file={}",
-                    cdrom.display()
-                ),
-                "-device",
-                "virtio-scsi-pci,id=scsi1",
-                "-device",
-                "scsi-hd,drive=cdparts0,bus=scsi1.0",
-                "-drive",
-                &format!(
-                    "id=cdparts0,if=none,format=raw,readonly=on,file={}",
-                    cdrom.display()
+                    "file={},format={},if=virtio",
+                    disk.display(),
+                    disk_image_format(disk)
                 ),
             ]);
         }
 
-        let mut extra_scsi_idx = if self.cdrom.is_some() { 2 } else { 0 };
-        for (idx, cdrom) in self.extra_cdroms.iter().enumerate() {
-            let scsi_id = format!("scsi{extra_scsi_idx}");
-            let drive_id = format!("extra_cdrom{idx}");
-            cmd.arg("-device")
-                .arg(format!("virtio-scsi-pci,id={scsi_id}"))
-                .arg("-device")
-                .arg(format!("scsi-cd,drive={drive_id},bus={scsi_id}.0"))
-                .arg("-drive")
-                .arg(format!(
-                    "id={drive_id},if=none,format=raw,readonly=on,file={}",
-                    cdrom.display()
-                ));
-            extra_scsi_idx += 1;
-        }
-
-        // Virtio disk
-        if let Some(disk) = &self.disk {
-            cmd.args(["-drive", &format!("file={},if=virtio", disk.display())]);
-        }
-
-        // UEFI firmware
         if let Some(ovmf_code) = &self.ovmf_code {
             cmd.args([
                 "-drive",
@@ -350,65 +323,64 @@ impl QemuBuilder {
             ]);
         }
 
-        // Boot order
         if let Some(order) = &self.boot_order {
             cmd.args(["-boot", order]);
         }
 
-        // User-mode networking
         if self.user_network {
             let mut netdev = String::from("user,id=net0");
             for (host_port, guest_port) in &self.user_network_hostfwd {
                 netdev.push_str(&format!(
-                    ",hostfwd=tcp:127.0.0.1:{}-:{}",
-                    host_port, guest_port
+                    ",hostfwd=tcp:{HOSTFWD_ADDRESS}:{host_port}-:{guest_port}"
                 ));
             }
             cmd.args(["-netdev", &netdev]);
             cmd.args(["-device", "virtio-net-pci,netdev=net0"]);
         }
 
-        // Display
         if self.nographic {
             cmd.arg("-nographic");
-            // Disable VGA when headless to avoid needing vgabios ROM files
-            if self.vga.is_none() {
-                cmd.args(["-vga", "none"]);
-            }
         } else if let Some(display) = &self.display {
             cmd.args(["-display", display]);
         }
-
-        if let Some(vga) = &self.vga {
-            cmd.args(["-vga", vga]);
+        // A headless VM gets no VGA adapter, so QEMU needs no vgabios ROMs.
+        match (&self.vga, self.nographic) {
+            (Some(vga), _) => {
+                cmd.args(["-vga", vga]);
+            }
+            (None, true) => {
+                cmd.args(["-vga", "none"]);
+            }
+            (None, false) => {}
         }
-
-        // VNC
+        for device in &self.devices {
+            cmd.args(["-device", device]);
+        }
         if let Some(display) = self.vnc_display {
             cmd.args(["-vnc", &format!(":{}", display)]);
         }
 
-        // Serial
-        if self.serial_stdio {
-            cmd.args(["-serial", "mon:stdio"]);
-        } else if let Some(path) = &self.serial_file {
-            cmd.args(["-serial", &format!("file:{}", path.display())]);
+        match &self.serial {
+            Some(Serial::Stdio) => {
+                cmd.args(["-serial", "mon:stdio"]);
+            }
+            Some(Serial::File(path)) => {
+                cmd.args(["-serial", &format!("file:{}", path.display())]);
+            }
+            None => {}
         }
-
-        // QMP socket
+        if self.no_monitor {
+            cmd.args(["-monitor", "none"]);
+        }
         if let Some(socket) = &self.qmp_socket {
             cmd.args(["-qmp", &format!("unix:{},server,nowait", socket.display())]);
         }
-
-        // fw_cfg file injection
         for item in &self.fw_cfg_files {
             cmd.args([
                 "-fw_cfg",
                 &format!("name={},file={}", item.name, item.path.display()),
             ]);
         }
-
-        // No reboot
         if self.no_reboot {
             cmd.arg("-no-reboot");
         }
@@ -416,7 +388,7 @@ impl QemuBuilder {
         cmd
     }
 
-    /// Build command with piped stdio (for serial console control).
+    /// Build command with piped stdio (for `Console` serial control).
     pub fn build_piped(self) -> Command {
         let mut cmd = self.build();
         cmd.stdin(Stdio::piped())
@@ -424,113 +396,98 @@ impl QemuBuilder {
             .stderr(Stdio::inherit());
         cmd
     }
+}
 
-    /// Build command with inherited stdio (for interactive use).
-    pub fn build_interactive(self) -> Command {
-        let mut cmd = self.build();
-        cmd.stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
-        cmd
+/// `qcow2` when the image starts with the qcow2 magic, else `raw`.
+pub fn disk_image_format(path: &Path) -> &'static str {
+    use std::io::Read;
+    const QCOW2_MAGIC: [u8; 4] = [0x51, 0x46, 0x49, 0xFB];
+    let mut header = [0u8; 4];
+    let is_qcow2 = std::fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut header))
+        .is_ok()
+        && header == QCOW2_MAGIC;
+    if is_qcow2 {
+        "qcow2"
+    } else {
+        "raw"
     }
 }
 
-/// Find OVMF firmware (UEFI code) on the system.
-///
-/// Searches common locations across distros.
-pub fn find_ovmf() -> Option<PathBuf> {
-    // Check OVMF_PATH env var first (set by recipe when OVMF is extracted to .tools/)
-    if let Ok(path) = std::env::var("OVMF_PATH") {
-        let p = PathBuf::from(&path);
-        if p.exists() {
-            return Some(p);
-        }
-    }
+/// OVMF candidate directories across distros (Fedora/RHEL, Debian/Ubuntu,
+/// Arch, NixOS), each holding a CODE and a VARS image.
+const OVMF_FILES: &[(&str, &str)] = &[
+    ("/usr/share/edk2/ovmf/OVMF_CODE.fd", "OVMF_VARS.fd"),
+    ("/usr/share/OVMF/OVMF_CODE.fd", "OVMF_VARS.fd"),
+    ("/usr/share/OVMF/OVMF_CODE_4M.fd", "OVMF_VARS_4M.fd"),
+    ("/usr/share/edk2-ovmf/x64/OVMF_CODE.fd", "OVMF_VARS.fd"),
+    ("/run/libvirt/nix-ovmf/OVMF_CODE.fd", "OVMF_VARS.fd"),
+];
 
-    let candidates = [
-        // Fedora/RHEL
-        "/usr/share/edk2/ovmf/OVMF_CODE.fd",
-        "/usr/share/OVMF/OVMF_CODE.fd",
-        // Debian/Ubuntu
-        "/usr/share/OVMF/OVMF_CODE_4M.fd",
-        "/usr/share/qemu/OVMF.fd",
-        // Arch
-        "/usr/share/edk2-ovmf/x64/OVMF_CODE.fd",
-        // NixOS
-        "/run/libvirt/nix-ovmf/OVMF_CODE.fd",
-    ];
-
-    candidates.iter().map(PathBuf::from).find(|p| p.exists())
-}
-
-/// Find OVMF variable storage template.
-///
-/// This file is copied and used as writable storage for UEFI boot entries.
-pub fn find_ovmf_vars() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("OVMF_VARS_PATH") {
-        let p = PathBuf::from(&path);
-        if p.exists() {
-            return Some(p);
-        }
-    }
-
-    if let Ok(code_path) = std::env::var("OVMF_PATH") {
-        let code = PathBuf::from(code_path);
-        if let Some(dir) = code.parent() {
-            for candidate in ["OVMF_VARS.fd", "OVMF_VARS_4M.fd"] {
-                let vars = dir.join(candidate);
-                if vars.exists() {
-                    return Some(vars);
-                }
+fn env_file(var: &str) -> Result<Option<PathBuf>> {
+    match std::env::var_os(var) {
+        Some(path) => {
+            let path = PathBuf::from(path);
+            if !path.is_file() {
+                bail!("{var} is set to '{}', which is not a file", path.display());
             }
+            Ok(Some(path))
         }
+        None => Ok(None),
     }
-
-    let candidates = [
-        // Fedora/RHEL
-        "/usr/share/edk2/ovmf/OVMF_VARS.fd",
-        "/usr/share/OVMF/OVMF_VARS.fd",
-        // Debian/Ubuntu
-        "/usr/share/OVMF/OVMF_VARS_4M.fd",
-        "/usr/share/qemu/OVMF_VARS.fd",
-        // Arch
-        "/usr/share/edk2-ovmf/x64/OVMF_VARS.fd",
-        // NixOS
-        "/run/libvirt/nix-ovmf/OVMF_VARS.fd",
-    ];
-
-    candidates.iter().map(PathBuf::from).find(|p| p.exists())
 }
 
-/// Create a VM disk image.
+/// OVMF firmware (UEFI code): `OVMF_PATH`, else the first installed
+/// distro package location.
+pub fn find_ovmf() -> Result<PathBuf> {
+    if let Some(path) = env_file("OVMF_PATH")? {
+        return Ok(path);
+    }
+    OVMF_FILES
+        .iter()
+        .map(|(code, _)| PathBuf::from(code))
+        .find(|p| p.is_file())
+        .context("OVMF firmware not found; install edk2-ovmf or set OVMF_PATH")
+}
+
+/// OVMF variable-store template matching `find_ovmf()`: `OVMF_VARS_PATH`,
+/// else the VARS image next to the firmware.
 ///
-/// # Arguments
-///
-/// * `path` - Path for the new disk image
-/// * `size` - Size string (e.g., "20G", "1024M")
+/// Copy it before use; the guest writes its boot entries into it.
+pub fn find_ovmf_vars() -> Result<PathBuf> {
+    if let Some(path) = env_file("OVMF_VARS_PATH")? {
+        return Ok(path);
+    }
+    let code = find_ovmf()?;
+    let dir = code.parent().unwrap_or(Path::new("/"));
+    let code_name = code.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let paired = OVMF_FILES
+        .iter()
+        .filter(|(c, _)| c.ends_with(code_name))
+        .map(|(_, vars)| *vars)
+        .chain(["OVMF_VARS.fd", "OVMF_VARS_4M.fd"]);
+    for vars in paired {
+        let candidate = dir.join(vars);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    bail!(
+        "no OVMF variable store next to {}; set OVMF_VARS_PATH",
+        code.display()
+    )
+}
+
+/// Create a qcow2 VM disk image of `size` (e.g., "20G").
 pub fn create_disk(path: &Path, size: &str) -> Result<()> {
-    let status = match Command::new("qemu-img")
-        .args(["create", "-f", "qcow2"])
+    let status = Command::new("qemu-img")
+        .args(["create", "-q", "-f", "qcow2"])
         .arg(path)
         .arg(size)
         .status()
-    {
-        Ok(status) => status,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            bail!(
-                "missing required dependency 'qemu-img' in PATH; refusing raw fallback for '{}'.\n\
-Install tooling with: `recipe install --build-dir .artifacts/tools --recipes-path distro-builder/recipes qemu-deps`\n\
-Or install system qemu-img explicitly.",
-                path.display()
-            );
-        }
-        Err(err) => {
-            return Err(err).context("Failed to run qemu-img. Is QEMU installed?");
-        }
-    };
-
+        .context("running qemu-img (is QEMU installed?)")?;
     if !status.success() {
-        bail!("qemu-img create failed with status: {}", status);
+        bail!("qemu-img create {} failed with {status}", path.display());
     }
     Ok(())
 }

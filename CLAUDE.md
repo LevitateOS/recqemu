@@ -2,7 +2,7 @@
 
 ## What is recqemu?
 
-Shared QEMU command builder, serial console, and utilities. Used by both leviso (development) and install-tests (E2E testing).
+The one QEMU command builder, plus serial console and utilities. Used by xtask (development boots) and install-tests (E2E testing).
 
 ## What Belongs Here
 
@@ -11,7 +11,6 @@ Shared QEMU command builder, serial console, and utilities. Used by both leviso 
 - `create_disk()` - qcow2 disk creation
 - `kvm_available()` - KVM detection
 - `patterns` - Boot/error pattern constants
-- `process` - Test locking and stale process cleanup
 - `serial` - Serial console I/O (Console, exec, auth, boot)
 
 ## What Does NOT Belong Here
@@ -19,7 +18,6 @@ Shared QEMU command builder, serial console, and utilities. Used by both leviso 
 | Don't put here | Put it in |
 |----------------|-----------|
 | QMP protocol | `testing/install-tests/src/qemu/qmp/` |
-| Anti-cheat protections | `testing/install-tests/src/qemu/builder.rs` |
 | DistroContext-aware code | `testing/install-tests/` |
 | Executor trait | `testing/install-tests/src/executor.rs` |
 
@@ -40,10 +38,9 @@ create_disk(Path::new("disk.qcow2"), "20G")?;
 
 // Build QEMU command
 let mut cmd = QemuBuilder::new()
-    .memory("4G")
     .cdrom(iso_path)
     .disk(disk_path)
-    .uefi(find_ovmf().unwrap())
+    .uefi(find_ovmf()?)
     .user_network()
     .nographic()
     .build_piped();
@@ -57,6 +54,5 @@ console.exec_ok("ls -la", Duration::from_secs(10))?;
 
 ## Consumers
 
-- `leviso` - `run_iso()` and `test_iso()` commands
-- `install-tests` - E2E installation testing (extends with anti-cheat)
-- `fsdbg` - Future: boot command for runtime verification
+- `xtask` - `cargo xtask scenarios boot` (serial, VNC or local window)
+- `install-tests` - E2E installation testing
