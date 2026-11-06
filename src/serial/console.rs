@@ -1,10 +1,11 @@
-//! The serial console of a QEMU guest: lines in, text out, with a transcript.
+//! The serial console of a guest: lines in, text out, with a transcript.
 
 use anyhow::{bail, Context, Result};
 use std::io::{Read, Write};
-use std::process::Child;
+use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How many transcript lines an error shows.
 pub(crate) const CONTEXT_LINES: usize = 30;
@@ -25,24 +26,39 @@ impl CommandResult {
     }
 }
 
-/// Console controller for QEMU serial I/O (`-serial mon:stdio`, piped).
+/// Console controller for a guest's serial port.
 pub struct Console {
-    stdin: std::process::ChildStdin,
+    writer: Box<dyn Write + Send>,
     rx: Receiver<String>,
     /// Every line received, for diagnostics.
     transcript: Vec<String>,
 }
 
 impl Console {
-    /// Take over a QEMU process spawned with piped stdin/stdout.
-    pub fn new(child: &mut Child) -> Result<Self> {
-        let stdin = child.stdin.take().context("Failed to get QEMU stdin")?;
-        let stdout = child.stdout.take().context("Failed to get QEMU stdout")?;
+    /// Connect to a serial port exposed as a unix socket (a libvirt domain's
+    /// `SerialTarget::Socket`), waiting up to `timeout` for it to appear.
+    pub fn connect(socket: &Path, timeout: Duration) -> Result<Self> {
+        let started = Instant::now();
+        let stream = loop {
+            match UnixStream::connect(socket) {
+                Ok(stream) => break stream,
+                Err(err) if started.elapsed() >= timeout => {
+                    return Err(err).with_context(|| format!("connecting to the serial socket '{}'", socket.display()));
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(100)),
+            }
+        };
+        let reader = stream.try_clone().context("duplicating the serial socket")?;
+        Ok(Self::from_streams(reader, stream))
+    }
+
+    /// Drive a serial port given its output and input streams.
+    pub fn from_streams(output: impl Read + Send + 'static, input: impl Write + Send + 'static) -> Self {
         let (chunk_tx, chunk_rx) = mpsc::channel::<Vec<u8>>();
         std::thread::spawn(move || {
-            let mut stdout = stdout;
+            let mut output = output;
             let mut buf = [0u8; 4096];
-            while let Ok(n) = stdout.read(&mut buf) {
+            while let Ok(n) = output.read(&mut buf) {
                 if n == 0 || chunk_tx.send(buf[..n].to_vec()).is_err() {
                     break;
                 }
@@ -50,16 +66,16 @@ impl Console {
         });
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || assemble_lines(chunk_rx, tx));
-        Ok(Self {
-            stdin,
+        Self {
+            writer: Box::new(input),
             rx,
             transcript: Vec::new(),
-        })
+        }
     }
 
     /// The next line within `timeout` (`None` on timeout); every line goes
     /// into the transcript. Fails when QEMU's output closed.
-    pub(crate) fn recv_line(&mut self, timeout: Duration) -> Result<Option<String>> {
+    pub fn recv_line(&mut self, timeout: Duration) -> Result<Option<String>> {
         match self.rx.recv_timeout(timeout) {
             Ok(line) => {
                 self.transcript.push(line.clone());
@@ -67,16 +83,16 @@ impl Console {
             }
             Err(RecvTimeoutError::Timeout) => Ok(None),
             Err(RecvTimeoutError::Disconnected) => bail!(
-                "QEMU serial output closed (process died?)\n\nLast output:\n{}",
+                "the guest's serial output closed (the VM stopped?)\n\nLast output:\n{}",
                 self.tail()
             ),
         }
     }
 
     /// Type `text` into the guest.
-    pub(crate) fn send(&mut self, text: &str) -> Result<()> {
-        self.stdin.write_all(text.as_bytes())?;
-        self.stdin.flush()?;
+    pub fn send(&mut self, text: &str) -> Result<()> {
+        self.writer.write_all(text.as_bytes())?;
+        self.writer.flush()?;
         Ok(())
     }
 

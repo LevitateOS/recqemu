@@ -1,84 +1,64 @@
 # recqemu
 
-QEMU command builder and utilities for Linux VM testing.
+Scenario VMs as libvirt domains, and the serial console that drives them.
 
-Fluent API for constructing QEMU commands with UEFI boot, virtio devices, and common configurations.
+Every VM the scenarios and `cargo xtask run` boot is a transient libvirt
+domain on the user's session (`qemu:///session`, or `LEVITATE_LIBVIRT_URI`),
+so it can be watched and managed in Cockpit (Virtual Machines, user session)
+or with `virsh -c qemu:///session list`. libvirt runs QEMU as the user, so
+images under the user's home need no relabelling.
 
 ## Status
 
 **Beta.** Library only (no CLI).
 
-## Library Usage
+## Usage
 
 ```rust
-use recqemu::{QemuBuilder, find_ovmf, create_disk};
+use recqemu::libvirt::{Domain, DomainSpec, SerialTarget, UefiVars};
+use recqemu::serial::Console;
 
-// Create a disk
-create_disk(Path::new("disk.qcow2"), "20G")?;
-
-// Build QEMU command
-let mut cmd = QemuBuilder::new()
-    .cdrom("/path/to/iso")
-    .disk("/path/to/disk.qcow2")
-    .uefi(find_ovmf()?)
-    .user_network()
-    .build();
-
-cmd.status()?;
+let spec = DomainSpec {
+    name: "levitate-live-boot".into(),
+    title: "Scenario VM levitate-live-boot".into(),
+    uefi_code: recqemu::find_ovmf()?,
+    uefi_vars: UefiVars::Fresh { template: recqemu::find_ovmf_vars()?, path: vars_path },
+    disk: Some(disk),                 // virtio, qcow2 or raw (detected)
+    boot_iso: Some(iso),              // booted first: a CD and a read-only disk
+    extra_cdroms: vec![],             // CDs that are not booted
+    fw_cfg: vec![],                   // ("opt/...", file) entries
+    ssh_forward: Some(port),          // 127.0.0.1:port -> guest 22 (passt)
+    serial: SerialTarget::Socket(socket.clone()),
+    serial_log: log,                  // every serial line, appended
+};
+let domain = Domain::create_paused(&spec)?;   // paused: no output is missed
+let mut console = Console::connect(&socket, Duration::from_secs(20))?;
+domain.resume()?;
+// ... console.wait_for_boot(...), console.login(...), console.exec(...)
+// Dropping `domain` destroys it; a guest reboot or power-off ends it too.
 ```
 
-## Features
-
-### QemuBuilder
-
-Fluent builder for QEMU commands:
-
-```rust
-QemuBuilder::new()              // 4G, 4 CPUs, KVM when /dev/kvm exists
-    .cdrom(path)               // ISO via virtio-scsi
-    .cdrom_as_disk()           // also expose the ISO's appended partitions
-    .extra_cdrom(path)         // another read-only CD
-    .disk(path)                // Disk via virtio-blk (qcow2/raw detected)
-    .uefi(ovmf_path)           // UEFI boot with OVMF
-    .uefi_vars(vars_path)      // Writable UEFI vars
-    .user_network()            // QEMU user networking
-    .display("gtk,gl=on")      // Display backend
-    .vga("virtio")             // VGA adapter
-    .serial_stdio()            // Serial to stdout (or .serial_file(path))
-    .nographic()               // Headless mode
-    .no_reboot()               // Exit on reboot
-    .build()                   // Get Command
-    .build_piped()             // stdin/stdout piped, for Console
-```
+Each domain has 4 GiB, 4 CPUs (KVM when `/dev/kvm` exists, else TCG), a
+q35 machine with UEFI (OVMF), user networking through passt, a VNC display on
+127.0.0.1 for Cockpit, and `on_reboot`/`on_poweroff` set to destroy, so a
+guest reboot ends the domain and the caller starts the next boot.
+`SerialTarget::Pty` instead gives a pty for `virsh console`
+(`cargo xtask run`), and `Domain::keep_running` leaves a domain running after
+its handle is dropped.
 
 ### Utilities
 
 ```rust
-// Find OVMF firmware
 let ovmf = find_ovmf()?;          // OVMF_PATH, else distro package paths
 let vars = find_ovmf_vars()?;     // OVMF_VARS_PATH, else the VARS file next to it
-
-// Create qcow2 disk
-create_disk(Path::new("disk.qcow2"), "20G")?;
-
-// Check KVM availability
-if kvm_available() {
-    println!("Hardware acceleration available");
-}
+create_disk(Path::new("disk.qcow2"), "20G")?;   // qemu-img
 ```
 
 ## OVMF Search Paths
 
-`OVMF_PATH` (and `OVMF_VARS_PATH`) when set — a path that is not a file is an
-error — else the Fedora, Debian/Ubuntu, Arch and NixOS package locations in
+`OVMF_PATH` (and `OVMF_VARS_PATH`) when set (a path that is not a file is an
+error), else the Fedora, Debian/Ubuntu, Arch and NixOS package locations in
 `OVMF_FILES` in `src/lib.rs`.
-
-## What It Does
-
-- Builds QEMU command lines with sensible defaults
-- Handles OVMF firmware discovery across distros
-- Creates qcow2 disks with qemu-img
-- Detects KVM availability
 
 ## Serial test protocol
 
@@ -89,26 +69,21 @@ off on the serial console, empties the prompt and prints `SHELL_READY_MARKER`;
 its exit status, and `Console::login` drives getty and confirms the shell
 with a marker probe.
 
-## What It Does NOT Do
-
-- Run QEMU (returns `Command` for you to run)
-- Implement QMP protocol (see install-tests)
-
 ## Requirements
 
-- qemu-system-x86_64: `sudo dnf install qemu-system-x86`
+- libvirt with the QEMU driver: `sudo dnf install libvirt-daemon-kvm libvirt-client`
+  (the session daemon starts on demand)
+- passt: `sudo dnf install passt`
 - OVMF: `sudo dnf install edk2-ovmf`
+- qemu-img (for `create_disk`)
+- Cockpit with `cockpit-machines`, to manage the VMs in a browser (optional)
 
-## Building
-
-```bash
-cargo build --release
-```
+`cargo xtask doctor` checks these.
 
 ## Consumers
 
 - `xtask` - `cargo xtask run`
-- `install-tests` - E2E testing
+- `install-tests` - the scenarios
 
 ## License
 

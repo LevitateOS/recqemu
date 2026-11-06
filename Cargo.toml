@@ -9,3 +9,4 @@ description = "QEMU command builder and utilities for Linux VM testing"
 
 [dependencies]
 anyhow = "1.0"
+tempfile = "3"
