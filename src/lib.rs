@@ -24,14 +24,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// Guest memory; every VM gets this (there is no setter).
-pub const DEFAULT_MEMORY: &str = "4G";
+const DEFAULT_MEMORY: &str = "4G";
 
 /// Guest CPU count; every VM gets this (there is no setter).
-pub const DEFAULT_SMP: u32 = 4;
+const DEFAULT_SMP: u32 = 4;
 
 /// Where the guest's serial port goes.
 #[derive(Clone, Debug)]
-pub enum Serial {
+enum Serial {
     /// Multiplexed with the QEMU monitor on stdio.
     Stdio,
     /// Appended to a file.
@@ -59,8 +59,6 @@ pub struct QemuBuilder {
     display: Option<String>,
     devices: Vec<String>,
     no_monitor: bool,
-    qmp_socket: Option<PathBuf>,
-    vnc_display: Option<u16>,
     nodefaults: bool,
     fw_cfg_files: Vec<FwCfgFile>,
 }
@@ -102,8 +100,6 @@ impl QemuBuilder {
             display: None,
             devices: Vec::new(),
             no_monitor: false,
-            qmp_socket: None,
-            vnc_display: None,
             nodefaults: false,
             fw_cfg_files: Vec::new(),
         }
@@ -217,18 +213,6 @@ impl QemuBuilder {
 
     pub fn no_monitor(mut self) -> Self {
         self.no_monitor = true;
-        self
-    }
-
-    /// Set QMP socket path for programmatic control.
-    pub fn qmp_socket(mut self, path: impl Into<PathBuf>) -> Self {
-        self.qmp_socket = Some(path.into());
-        self
-    }
-
-    /// Set VNC display number (0 = port 5900).
-    pub fn vnc_display(mut self, display: u16) -> Self {
-        self.vnc_display = Some(display);
         self
     }
 
@@ -347,9 +331,6 @@ impl QemuBuilder {
         for device in &self.devices {
             cmd.args(["-device", device]);
         }
-        if let Some(display) = self.vnc_display {
-            cmd.args(["-vnc", &format!(":{}", display)]);
-        }
 
         match &self.serial {
             Some(Serial::Stdio) => {
@@ -362,9 +343,6 @@ impl QemuBuilder {
         }
         if self.no_monitor {
             cmd.args(["-monitor", "none"]);
-        }
-        if let Some(socket) = &self.qmp_socket {
-            cmd.args(["-qmp", &format!("unix:{},server,nowait", socket.display())]);
         }
         for item in &self.fw_cfg_files {
             cmd.args([
@@ -483,6 +461,6 @@ pub fn create_disk(path: &Path, size: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn kvm_available() -> bool {
+fn kvm_available() -> bool {
     Path::new("/dev/kvm").exists()
 }

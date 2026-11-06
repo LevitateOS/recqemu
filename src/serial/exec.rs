@@ -1,6 +1,6 @@
 //! Command execution over the serial console (see `protocol`).
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use std::time::{Duration, Instant};
 
 use super::ansi::strip_ansi_codes;
@@ -46,20 +46,5 @@ impl Console {
             exit_code: -1,
             output,
         })
-    }
-
-    /// Like [`exec`](Self::exec), but a non-zero exit or a timeout is an
-    /// error; returns the output.
-    pub fn exec_ok(&mut self, command: &str, timeout: Duration) -> Result<String> {
-        let result = self.exec(command, timeout)?;
-        if !result.success() {
-            bail!(
-                "Command failed (exit {}): {}\nOutput: {}",
-                result.exit_code,
-                command,
-                result.output
-            );
-        }
-        Ok(result.output)
     }
 }

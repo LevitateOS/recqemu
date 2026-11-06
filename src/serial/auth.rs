@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use super::ansi::strip_ansi_codes;
 use super::console::Console;
-use super::protocol::{LOGIN_OK_MARKER, LOGIN_PROBE};
+use super::protocol::{login_ok_marker, login_probe};
 
 /// Logins rejected before giving up.
 const MAX_ATTEMPTS: u32 = 3;
@@ -32,7 +32,7 @@ impl Console {
         self.send("\n")?;
         while Instant::now() < deadline {
             if state == State::WaitingForShell && quiet_since.elapsed() >= Duration::from_secs(1) {
-                self.send(LOGIN_PROBE)?;
+                self.send(&login_probe())?;
                 quiet_since = Instant::now();
             }
             let Some(line) = self.recv_line(Duration::from_millis(200))? else {
@@ -63,7 +63,7 @@ impl Console {
                     self.send(&format!("{password}\n"))?;
                     state = State::WaitingForShell;
                 }
-                State::WaitingForShell if line.contains(LOGIN_OK_MARKER) => return Ok(()),
+                State::WaitingForShell if line.contains(&login_ok_marker()) => return Ok(()),
                 _ => {}
             }
         }
