@@ -8,7 +8,8 @@ use super::console::{CommandResult, Console};
 use super::protocol::CommandMarkers;
 
 impl Console {
-    /// Execute a command and capture its output and exit code.
+    /// Run a command in the guest shell and capture its output and exit code.
+    /// Running out of time is not an error: the result is `completed: false`.
     pub fn exec(&mut self, command: &str, timeout: Duration) -> Result<CommandResult> {
         let markers = CommandMarkers::new();
         self.send(&markers.wrap(command))?;
@@ -47,7 +48,8 @@ impl Console {
         })
     }
 
-    /// Execute a command that's expected to succeed.
+    /// Like [`exec`](Self::exec), but a non-zero exit or a timeout is an
+    /// error; returns the output.
     pub fn exec_ok(&mut self, command: &str, timeout: Duration) -> Result<String> {
         let result = self.exec(command, timeout)?;
         if !result.success() {

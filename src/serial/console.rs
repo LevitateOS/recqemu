@@ -12,16 +12,14 @@ pub(crate) const CONTEXT_LINES: usize = 30;
 /// Result of executing a command in QEMU.
 #[derive(Debug)]
 pub struct CommandResult {
-    /// Whether the command completed.
+    /// False when the timeout ran out before the command finished.
     pub completed: bool,
-    /// Exit code (0 = success).
+    /// -1 when the command did not complete or its status was unreadable.
     pub exit_code: i32,
-    /// Output from the command.
     pub output: String,
 }
 
 impl CommandResult {
-    /// Check if the command succeeded.
     pub fn success(&self) -> bool {
         self.completed && self.exit_code == 0
     }

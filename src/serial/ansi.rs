@@ -1,8 +1,5 @@
-//! ANSI escape code handling for serial console output.
-//!
-//! Serial console output contains ANSI escape sequences for colors,
-//! cursor movement, etc. This module provides utilities to strip them
-//! for clean pattern matching.
+//! Serial console output carries ANSI escape sequences (colors, cursor
+//! movement); they are stripped before pattern matching.
 
 /// Strip ANSI escape codes from a string.
 ///
@@ -18,16 +15,14 @@ pub fn strip_ansi_codes(s: &str) -> String {
 
     while let Some(c) = chars.next() {
         if c == '\x1b' {
-            // Handle various escape sequence types
             match chars.peek() {
                 // CSI sequences: \x1b[...
                 Some(&'[') => {
-                    chars.next(); // consume '['
-                                  // Skip until we find a letter (the command terminator)
-                                  // CSI sequences can have parameters (numbers, ;) and intermediate bytes
+                    chars.next();
+                    // Parameter and intermediate bytes run until the final
+                    // byte, 0x40-0x7E (of which `[\]^_` are not accepted here).
                     while let Some(&next) = chars.peek() {
                         chars.next();
-                        // Final byte is 0x40-0x7E (@ through ~)
                         if next.is_ascii_alphabetic()
                             || next == '@'
                             || next == '`'
@@ -39,14 +34,14 @@ pub fn strip_ansi_codes(s: &str) -> String {
                 }
                 // OSC sequences: \x1b]... (terminated by BEL \x07 or ST \x1b\\)
                 Some(&']') => {
-                    chars.next(); // consume ']'
+                    chars.next();
                     while let Some(next) = chars.next() {
                         if next == '\x07' {
-                            break; // BEL terminator
+                            break;
                         }
                         if next == '\x1b' && chars.peek() == Some(&'\\') {
-                            chars.next(); // consume '\\'
-                            break; // ST terminator
+                            chars.next();
+                            break;
                         }
                     }
                 }
@@ -68,8 +63,8 @@ pub fn strip_ansi_codes(s: &str) -> String {
                         || c2 == '('
                         || c2 == ')' =>
                 {
-                    chars.next(); // consume the character
-                                  // Some sequences like \x1b( have one more char (charset selection)
+                    chars.next();
+                    // \x1b( and \x1b) select a charset, named by one more char.
                     if c2 == '(' || c2 == ')' {
                         chars.next();
                     }

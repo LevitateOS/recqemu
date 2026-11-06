@@ -23,10 +23,10 @@ use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// Default memory for VMs (4GB - real systems, not toys).
+/// Guest memory; every VM gets this (there is no setter).
 pub const DEFAULT_MEMORY: &str = "4G";
 
-/// Default CPU count.
+/// Guest CPU count; every VM gets this (there is no setter).
 pub const DEFAULT_SMP: u32 = 4;
 
 /// Where the guest's serial port goes.
@@ -39,9 +39,6 @@ pub enum Serial {
 }
 
 /// Builder for QEMU commands.
-///
-/// Provides a fluent API for constructing QEMU command lines with
-/// sensible defaults for UEFI boot testing.
 #[derive(Clone)]
 pub struct QemuBuilder {
     program: PathBuf,
@@ -174,7 +171,7 @@ impl QemuBuilder {
         self
     }
 
-    /// Send serial output to file.
+    /// Append serial output to a file.
     pub fn serial_file(mut self, path: impl Into<PathBuf>) -> Self {
         self.serial = Some(Serial::File(path.into()));
         self
@@ -218,7 +215,6 @@ impl QemuBuilder {
         self
     }
 
-    /// Run without the QEMU monitor.
     pub fn no_monitor(mut self) -> Self {
         self.no_monitor = true;
         self
@@ -236,7 +232,6 @@ impl QemuBuilder {
         self
     }
 
-    /// Start with no default devices.
     pub fn nodefaults(mut self) -> Self {
         self.nodefaults = true;
         self
@@ -254,7 +249,6 @@ impl QemuBuilder {
         self
     }
 
-    /// Build the QEMU command.
     pub fn build(self) -> Command {
         let mut cmd = Command::new(&self.program);
 
@@ -489,7 +483,6 @@ pub fn create_disk(path: &Path, size: &str) -> Result<()> {
     Ok(())
 }
 
-/// Check if KVM is available on this system.
 pub fn kvm_available() -> bool {
     Path::new("/dev/kvm").exists()
 }

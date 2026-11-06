@@ -1,10 +1,5 @@
-//! Serial console backend for QEMU.
-//!
-//! - `Console` - serial I/O with a transcript
-//! - `exec()` / `exec_ok()` - run commands with exit code capture
-//! - `wait_for_boot()` - wait for boot, judged by the caller's patterns
-//! - `login()` - serial getty login
-//! - `protocol` - the markers and the guest profile script both sides share
+//! Driving a QEMU guest through its serial console. `protocol` holds what the
+//! guest side must agree with.
 
 mod ansi;
 mod auth;
