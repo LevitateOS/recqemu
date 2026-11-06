@@ -17,7 +17,6 @@
 //! cmd.status()?;
 //! ```
 
-pub mod patterns;
 pub mod serial;
 
 use anyhow::{bail, Context, Result};

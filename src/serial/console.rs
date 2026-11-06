@@ -18,14 +18,12 @@ pub struct CommandResult {
     pub exit_code: i32,
     /// Output from the command.
     pub output: String,
-    /// Whether execution was aborted due to fatal error pattern.
-    pub aborted_on_error: bool,
 }
 
 impl CommandResult {
     /// Check if the command succeeded.
     pub fn success(&self) -> bool {
-        self.completed && self.exit_code == 0 && !self.aborted_on_error
+        self.completed && self.exit_code == 0
     }
 }
 
@@ -35,8 +33,6 @@ pub struct Console {
     rx: Receiver<String>,
     /// Every line received, for diagnostics.
     transcript: Vec<String>,
-    /// Services that failed during boot (tracked for diagnostics).
-    pub(crate) failed_services: Vec<String>,
 }
 
 impl Console {
@@ -60,7 +56,6 @@ impl Console {
             stdin,
             rx,
             transcript: Vec::new(),
-            failed_services: Vec::new(),
         })
     }
 
@@ -91,11 +86,6 @@ impl Console {
     pub(crate) fn tail(&self) -> String {
         let start = self.transcript.len().saturating_sub(CONTEXT_LINES);
         self.transcript[start..].join("\n")
-    }
-
-    /// Get any failed services that were observed during boot.
-    pub fn failed_services(&self) -> &[String] {
-        &self.failed_services
     }
 }
 
