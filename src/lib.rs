@@ -5,7 +5,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```text
 //! use recqemu::{QemuBuilder, find_ovmf, create_disk};
 //!
 //! create_disk(Path::new("disk.qcow2"), "20G")?;
