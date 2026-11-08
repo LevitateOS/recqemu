@@ -23,11 +23,7 @@ pub fn strip_ansi_codes(s: &str) -> String {
                     // byte, 0x40-0x7E (of which `[\]^_` are not accepted here).
                     while let Some(&next) = chars.peek() {
                         chars.next();
-                        if next.is_ascii_alphabetic()
-                            || next == '@'
-                            || next == '`'
-                            || (next as u8 >= 0x70 && next as u8 <= 0x7E)
-                        {
+                        if ('\x40'..='\x7e').contains(&next) && !"[\\]^_".contains(next) {
                             break;
                         }
                     }

@@ -2,7 +2,7 @@
 //! Cockpit (Virtual Machines) or with `virsh`.
 //!
 //! Each VM is a transient domain on the user's libvirt session
-//! (`qemu:///session` unless `LEVITATE_LIBVIRT_URI` says otherwise): libvirt
+//! (`qemu:///session`, [`URI`]): libvirt
 //! runs QEMU as the user, so images under the user's home need no
 //! relabelling, and user-mode networking (passt) forwards the guest's SSH to
 //! localhost. A guest reboot or power-off ends the domain, as `-no-reboot`
@@ -18,14 +18,12 @@ use std::time::{Duration, Instant};
 
 use crate::{disk_image_format, GUEST_SSH_PORT, HOSTFWD_ADDRESS};
 
-/// Guest memory in MiB.
-const MEMORY_MIB: u32 = 4096;
-/// Guest CPU count.
-const VCPUS: u32 = 4;
+/// The libvirt connection every scenario VM runs on: the user's session.
+pub const URI: &str = "qemu:///session";
 
-/// The libvirt connection scenario VMs use.
-pub fn uri() -> String {
-    std::env::var("LEVITATE_LIBVIRT_URI").unwrap_or_else(|_| "qemu:///session".to_string())
+/// The libvirt connection scenario VMs use ([`URI`]).
+pub fn uri() -> &'static str {
+    URI
 }
 
 /// Where the guest's serial port goes.
@@ -42,7 +40,8 @@ pub enum SerialTarget {
 pub enum UefiVars {
     /// An existing store the guest keeps writing (an installed system's).
     Existing(PathBuf),
-    /// A fresh copy of `template` at `path`, removed when the domain ends.
+    /// A fresh copy of `template` at `path`, which libvirt makes when the
+    /// domain starts (replacing what was there) and which stays afterwards.
     Fresh { template: PathBuf, path: PathBuf },
 }
 
@@ -53,18 +52,19 @@ pub struct DomainSpec {
     pub name: String,
     /// One line describing the VM, shown in Cockpit.
     pub title: String,
+    pub memory_mib: u32,
+    pub vcpus: u32,
     /// UEFI firmware (OVMF code).
     pub uefi_code: PathBuf,
     pub uefi_vars: UefiVars,
     /// The writable system disk, booted second when an ISO is attached.
     pub disk: Option<PathBuf>,
-    /// An ISO booted first, as a CD and also as a read-only disk (so the
-    /// live init sees the ISO's partitions).
+    /// An ISO booted first, as a CD and also as a read-only disk: a CD
+    /// drive does not expose the ISO's appended partitions, which the live
+    /// init mounts the rootfs from (`recinit::live::ROOTFS_PAYLOAD_PARTITION`).
     pub boot_iso: Option<PathBuf>,
     /// Images attached as CDs that are not booted.
     pub extra_cdroms: Vec<PathBuf>,
-    /// `fw_cfg` entries (`opt/...` names) and the files they carry.
-    pub fw_cfg: Vec<(String, PathBuf)>,
     /// Host port forwarded to the guest's SSH, on [`HOSTFWD_ADDRESS`].
     pub ssh_forward: Option<u16>,
     pub serial: SerialTarget,
@@ -73,14 +73,18 @@ pub struct DomainSpec {
 }
 
 impl DomainSpec {
+    /// Guest memory in MiB and CPU count when the caller has no reason to differ.
+    pub const DEFAULT_MEMORY_MIB: u32 = 4096;
+    pub const DEFAULT_VCPUS: u32 = 4;
+
     /// The libvirt domain XML.
-    pub fn xml(&self) -> String {
+    pub fn xml(&self) -> Result<String> {
         let mut x = String::new();
         let _ = writeln!(x, "<domain type='{}'>", if kvm_available() { "kvm" } else { "qemu" });
         let _ = writeln!(x, "  <name>{}</name>", esc(&self.name));
         let _ = writeln!(x, "  <title>{}</title>", esc(&self.title));
-        let _ = writeln!(x, "  <memory unit='MiB'>{MEMORY_MIB}</memory>");
-        let _ = writeln!(x, "  <vcpu>{VCPUS}</vcpu>");
+        let _ = writeln!(x, "  <memory unit='MiB'>{}</memory>", self.memory_mib);
+        let _ = writeln!(x, "  <vcpu>{}</vcpu>", self.vcpus);
         let _ = writeln!(x, "  <os>");
         let _ = writeln!(x, "    <type arch='x86_64' machine='q35'>hvm</type>");
         let _ = writeln!(
@@ -105,13 +109,6 @@ impl DomainSpec {
         let _ = writeln!(x, "  <features><acpi/><apic/><smm state='on'/></features>");
         if kvm_available() {
             let _ = writeln!(x, "  <cpu mode='host-passthrough'/>");
-        }
-        if !self.fw_cfg.is_empty() {
-            let _ = writeln!(x, "  <sysinfo type='fwcfg'>");
-            for (name, file) in &self.fw_cfg {
-                let _ = writeln!(x, "    <entry name='{}' file='{}'/>", esc(name), esc_path(file));
-            }
-            let _ = writeln!(x, "  </sysinfo>");
         }
         // A guest reboot ends the domain; the caller starts the next boot.
         let _ = writeln!(x, "  <on_poweroff>destroy</on_poweroff>");
@@ -145,7 +142,7 @@ impl DomainSpec {
         }
         if let Some(disk) = &self.disk {
             let _ = writeln!(x, "    <disk type='file' device='disk'>");
-            let _ = writeln!(x, "      <driver name='qemu' type='{}'/>", disk_image_format(disk));
+            let _ = writeln!(x, "      <driver name='qemu' type='{}'/>", disk_image_format(disk)?);
             let _ = writeln!(x, "      <source file='{}'/>", esc_path(disk));
             let _ = writeln!(x, "      <target dev='vda' bus='virtio'/>");
             let _ = writeln!(x, "      <boot order='{boot_order}'/>");
@@ -182,15 +179,13 @@ impl DomainSpec {
         let _ = writeln!(x, "    <video><model type='virtio'/></video>");
         let _ = writeln!(x, "  </devices>");
         let _ = writeln!(x, "</domain>");
-        x
+        Ok(x)
     }
 }
 
 /// A running transient domain; dropping it destroys the domain.
 pub struct Domain {
     name: String,
-    uri: String,
-    fresh_vars: Option<PathBuf>,
     /// Leave the domain running when this handle is dropped.
     keep: bool,
 }
@@ -198,53 +193,49 @@ pub struct Domain {
 impl Domain {
     /// Create the domain paused, so whoever reads the serial port can attach
     /// before the guest prints anything; [`resume`](Self::resume) starts it.
-    /// A domain of the same name left by an earlier run is destroyed first.
+    /// A running domain of the same name (another run's, or one left in
+    /// Cockpit) is an error, not something to kill.
     pub fn create_paused(spec: &DomainSpec) -> Result<Self> {
-        let uri = uri();
-        if domain_exists(&uri, &spec.name) {
-            let persistent = virsh(&uri, &["dominfo", &spec.name])
-                .map(|info| info.lines().any(|l| l.starts_with("Persistent:") && l.contains("yes")))
-                .unwrap_or(false);
-            if persistent {
+        if domain_exists(&spec.name)? {
+            let info = virsh(URI, &["dominfo", &spec.name])?;
+            if info.lines().any(|l| l.starts_with("Persistent:") && l.contains("yes")) {
                 bail!(
-                    "a defined libvirt domain is called '{}'; scenario VMs are transient and need the name (virsh -c {uri} undefine {})",
+                    "a defined libvirt domain is called '{}'; scenario VMs are transient and need the name (virsh -c {URI} undefine {})",
                     spec.name,
                     spec.name
                 );
             }
-            let _ = virsh(&uri, &["destroy", &spec.name]);
+            bail!(
+                "libvirt domain '{}' is already running (another run of it, or one left in Cockpit); stop it first: virsh -c {URI} destroy {}",
+                spec.name,
+                spec.name
+            );
         }
         if let SerialTarget::Socket(path) = &spec.serial {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).with_context(|| format!("creating '{}'", parent.display()))?;
             }
-            let _ = std::fs::remove_file(path);
+            remove_if_present(path)?;
         }
         if let Some(parent) = spec.serial_log.parent() {
             std::fs::create_dir_all(parent).with_context(|| format!("creating '{}'", parent.display()))?;
         }
-        let fresh_vars = match &spec.uefi_vars {
-            UefiVars::Fresh { path, .. } => {
-                let _ = std::fs::remove_file(path);
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                Some(path.clone())
+        if let UefiVars::Fresh { path, .. } = &spec.uefi_vars {
+            remove_if_present(path)?;
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).with_context(|| format!("creating '{}'", parent.display()))?;
             }
-            UefiVars::Existing(_) => None,
-        };
+        }
         let xml_file = tempfile::Builder::new()
             .prefix(&format!("{}-", spec.name))
             .suffix(".xml")
             .tempfile()
             .context("writing the domain XML")?;
-        std::fs::write(xml_file.path(), spec.xml())?;
-        virsh(&uri, &["create", "--paused", &xml_file.path().to_string_lossy()])
-            .with_context(|| format!("starting libvirt domain '{}' on {uri}", spec.name))?;
+        std::fs::write(xml_file.path(), spec.xml()?)?;
+        virsh(URI, &["create", "--paused", &xml_file.path().to_string_lossy()])
+            .with_context(|| format!("starting libvirt domain '{}' on {URI}", spec.name))?;
         Ok(Self {
             name: spec.name.clone(),
-            uri,
-            fresh_vars,
             keep: false,
         })
     }
@@ -255,23 +246,23 @@ impl Domain {
 
     /// The libvirt connection the domain runs on.
     pub fn uri(&self) -> &str {
-        &self.uri
+        URI
     }
 
     pub fn resume(&self) -> Result<()> {
-        virsh(&self.uri, &["resume", &self.name]).map(|_| ())
+        virsh(URI, &["resume", &self.name]).map(|_| ())
     }
 
     /// The domain still exists (running or paused).
-    pub fn is_running(&self) -> bool {
-        domain_exists(&self.uri, &self.name)
+    pub fn is_running(&self) -> Result<bool> {
+        domain_exists(&self.name)
     }
 
     /// Wait for the guest to end the domain (a reboot or power-off).
     pub fn wait_for_shutdown(&self, timeout: Duration) -> Result<()> {
         let started = Instant::now();
         while started.elapsed() < timeout {
-            if !self.is_running() {
+            if !self.is_running()? {
                 return Ok(());
             }
             std::thread::sleep(Duration::from_millis(500));
@@ -280,24 +271,17 @@ impl Domain {
     }
 
     /// Stop the domain now.
-    pub fn destroy(&self) {
-        if self.is_running() {
-            let _ = virsh(&self.uri, &["destroy", &self.name]);
+    pub fn destroy(&self) -> Result<()> {
+        if self.is_running()? {
+            virsh(URI, &["destroy", &self.name])?;
         }
+        Ok(())
     }
 
     /// Let go of the domain without stopping it: it keeps running (for
     /// Cockpit) until the guest powers off or someone destroys it.
     pub fn keep_running(mut self) {
         self.keep = true;
-    }
-
-    /// Where the VNC display listens, as `virsh domdisplay` reports it.
-    pub fn display(&self) -> Option<String> {
-        virsh(&self.uri, &["domdisplay", &self.name])
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
     }
 }
 
@@ -306,20 +290,39 @@ impl Drop for Domain {
         if self.keep {
             return;
         }
-        self.destroy();
-        if let Some(vars) = &self.fresh_vars {
-            let _ = std::fs::remove_file(vars);
+        if let Err(err) = self.destroy() {
+            eprintln!(
+                "warning: could not stop libvirt domain '{}' ({err:#}); stop it with: virsh -c {URI} destroy {}",
+                self.name, self.name
+            );
         }
     }
 }
 
-fn domain_exists(uri: &str, name: &str) -> bool {
-    Command::new("virsh")
-        .args(["-c", uri, "domstate", name])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+/// Whether domain `name` exists on [`URI`]; an error when libvirt cannot say.
+fn domain_exists(name: &str) -> Result<bool> {
+    let out = Command::new("virsh")
+        .args(["-c", URI, "domstate", name])
+        .stdin(Stdio::null())
+        .output()
+        .context("running virsh (is libvirt installed?)")?;
+    if out.status.success() {
+        return Ok(true);
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if stderr.contains("failed to get domain") || stderr.contains("Domain not found") {
+        return Ok(false);
+    }
+    bail!("virsh -c {URI} domstate {name} failed: {}", stderr.trim())
+}
+
+fn remove_if_present(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+            Err(err).with_context(|| format!("removing '{}'", path.display()))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Run `virsh -c uri args...` and return its output.
@@ -340,16 +343,18 @@ pub fn virsh(uri: &str, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Per-user runtime directory for sockets and fresh UEFI variable stores
-/// (unix socket paths must stay short).
+/// Per-user runtime directory for sockets, serial transcripts and temporary
+/// UEFI variable stores (unix socket paths must stay short).
 pub fn runtime_dir() -> PathBuf {
     let base = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
-    base.join("levitate-vm")
+    base.join("scenario-vm")
 }
 
-fn kvm_available() -> bool {
+/// Whether VMs run under KVM; without `/dev/kvm` libvirt runs them under
+/// TCG emulation, several times slower.
+pub fn kvm_available() -> bool {
     Path::new("/dev/kvm").exists()
 }
 

@@ -3,7 +3,7 @@
 Scenario VMs as libvirt domains, and the serial console that drives them.
 
 Every VM the scenarios and `cargo xtask run` boot is a transient libvirt
-domain on the user's session (`qemu:///session`, or `LEVITATE_LIBVIRT_URI`),
+domain on the user's session (`qemu:///session`, `libvirt::URI`),
 so it can be watched and managed in Cockpit (Virtual Machines, user session)
 or with `virsh -c qemu:///session list`. libvirt runs QEMU as the user, so
 images under the user's home need no relabelling.
@@ -21,12 +21,13 @@ use recqemu::serial::Console;
 let spec = DomainSpec {
     name: "levitate-live-boot".into(),
     title: "Scenario VM levitate-live-boot".into(),
+    memory_mib: DomainSpec::DEFAULT_MEMORY_MIB,
+    vcpus: DomainSpec::DEFAULT_VCPUS,
     uefi_code: recqemu::find_ovmf()?,
     uefi_vars: UefiVars::Fresh { template: recqemu::find_ovmf_vars()?, path: vars_path },
     disk: Some(disk),                 // virtio, qcow2 or raw (detected)
     boot_iso: Some(iso),              // booted first: a CD and a read-only disk
     extra_cdroms: vec![],             // CDs that are not booted
-    fw_cfg: vec![],                   // ("opt/...", file) entries
     ssh_forward: Some(port),          // 127.0.0.1:port -> guest 22 (passt)
     serial: SerialTarget::Socket(socket.clone()),
     serial_log: log,                  // every serial line, appended
@@ -36,9 +37,10 @@ let mut console = Console::connect(&socket, Duration::from_secs(20))?;
 domain.resume()?;
 // ... console.wait_for_boot(...), console.login(...), console.exec(...)
 // Dropping `domain` destroys it; a guest reboot or power-off ends it too.
+// A running domain of the same name is an error, never killed.
 ```
 
-Each domain has 4 GiB, 4 CPUs (KVM when `/dev/kvm` exists, else TCG), a
+Each domain has the memory and CPUs its spec gives (KVM when `/dev/kvm` exists, else TCG), a
 q35 machine with UEFI (OVMF), user networking through passt, a VNC display on
 127.0.0.1 for Cockpit, and `on_reboot`/`on_poweroff` set to destroy, so a
 guest reboot ends the domain and the caller starts the next boot.
@@ -49,16 +51,17 @@ its handle is dropped.
 ### Utilities
 
 ```rust
-let ovmf = find_ovmf()?;          // OVMF_PATH, else distro package paths
-let vars = find_ovmf_vars()?;     // OVMF_VARS_PATH, else the VARS file next to it
+let ovmf = find_ovmf()?;          // the host's OVMF code image
+let vars = find_ovmf_vars()?;     // the VARS template paired with it
 create_disk(Path::new("disk.qcow2"), "20G")?;   // qemu-img
+create_overlay(Path::new("disk.qcow2"), Path::new("run.qcow2"))?;   // writes stay in run.qcow2
 ```
 
 ## OVMF Search Paths
 
-`OVMF_PATH` (and `OVMF_VARS_PATH`) when set (a path that is not a file is an
-error), else the Fedora, Debian/Ubuntu, Arch and NixOS package locations in
-`OVMF_FILES` in `src/lib.rs`.
+The host's packages only (libvirt's QEMU runs every VM, so its host's
+firmware is the one that matches): the Fedora, Debian/Ubuntu, Arch and NixOS
+CODE/VARS pairs in `OVMF_FILES` in `src/lib.rs`.
 
 ## Serial test protocol
 
@@ -75,7 +78,7 @@ with a marker probe.
   (the session daemon starts on demand)
 - passt: `sudo dnf install passt`
 - OVMF: `sudo dnf install edk2-ovmf`
-- qemu-img (for `create_disk`)
+- qemu-img (for `create_disk` and `create_overlay`)
 - Cockpit with `cockpit-machines`, to manage the VMs in a browser (optional)
 
 `cargo xtask doctor` checks these.

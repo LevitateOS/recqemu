@@ -5,6 +5,7 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// How many transcript lines an error shows.
@@ -32,6 +33,8 @@ pub struct Console {
     rx: Receiver<String>,
     /// Every line received, for diagnostics.
     transcript: Vec<String>,
+    /// Why reading the serial port stopped, when it was an error, not EOF.
+    read_error: Arc<Mutex<Option<String>>>,
 }
 
 impl Console {
@@ -55,12 +58,24 @@ impl Console {
     /// Drive a serial port given its output and input streams.
     pub fn from_streams(output: impl Read + Send + 'static, input: impl Write + Send + 'static) -> Self {
         let (chunk_tx, chunk_rx) = mpsc::channel::<Vec<u8>>();
+        let read_error = Arc::new(Mutex::new(None));
+        let reader_error = Arc::clone(&read_error);
         std::thread::spawn(move || {
             let mut output = output;
             let mut buf = [0u8; 4096];
-            while let Ok(n) = output.read(&mut buf) {
-                if n == 0 || chunk_tx.send(buf[..n].to_vec()).is_err() {
-                    break;
+            loop {
+                match output.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if chunk_tx.send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(err) => {
+                        *reader_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(err.to_string());
+                        break;
+                    }
                 }
             }
         });
@@ -70,6 +85,7 @@ impl Console {
             writer: Box::new(input),
             rx,
             transcript: Vec::new(),
+            read_error,
         }
     }
 
@@ -82,10 +98,15 @@ impl Console {
                 Ok(Some(line))
             }
             Err(RecvTimeoutError::Timeout) => Ok(None),
-            Err(RecvTimeoutError::Disconnected) => bail!(
-                "the guest's serial output closed (the VM stopped?)\n\nLast output:\n{}",
-                self.tail()
-            ),
+            Err(RecvTimeoutError::Disconnected) => {
+                match self.read_error.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+                    Some(err) => bail!("reading the guest's serial port failed: {err}\n\nLast output:\n{}", self.tail()),
+                    None => bail!(
+                        "the guest's serial output closed (the VM stopped?)\n\nLast output:\n{}",
+                        self.tail()
+                    ),
+                }
+            }
         }
     }
 
