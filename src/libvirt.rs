@@ -74,6 +74,10 @@ impl DomainSpec {
     /// Guest memory in MiB and CPU count when the caller has no reason to differ.
     pub const DEFAULT_MEMORY_MIB: u32 = 4096;
     pub const DEFAULT_VCPUS: u32 = 4;
+    /// Guest memory for a desktop system: a whole desktop session, and on a
+    /// live boot a tmpfs of half the memory for its writes (docs/desktop.md:
+    /// the prototypes ran in 4 GiB with no room to spare).
+    pub const DESKTOP_MEMORY_MIB: u32 = 6144;
 
     /// The libvirt domain XML.
     pub fn xml(&self) -> Result<String> {
