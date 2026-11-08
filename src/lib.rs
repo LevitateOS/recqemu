@@ -4,8 +4,11 @@
 //! Cockpit; this crate also finds the OVMF firmware, makes disk images, and
 //! drives a guest through its serial console ([`serial`]).
 
+pub mod guest;
 pub mod libvirt;
 pub mod serial;
+
+pub use guest::{shell_quote, Guest, Outcome};
 
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};

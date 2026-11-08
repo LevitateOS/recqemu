@@ -11,22 +11,6 @@ use std::time::{Duration, Instant};
 /// How many transcript lines an error shows.
 pub(crate) const CONTEXT_LINES: usize = 30;
 
-/// Result of executing a command in QEMU.
-#[derive(Debug)]
-pub struct CommandResult {
-    /// False when the timeout ran out before the command finished.
-    pub completed: bool,
-    /// -1 when the command did not complete or its status was unreadable.
-    pub exit_code: i32,
-    pub output: String,
-}
-
-impl CommandResult {
-    pub fn success(&self) -> bool {
-        self.completed && self.exit_code == 0
-    }
-}
-
 /// Console controller for a guest's serial port.
 pub struct Console {
     writer: Box<dyn Write + Send>,
@@ -35,6 +19,8 @@ pub struct Console {
     transcript: Vec<String>,
     /// Why reading the serial port stopped, when it was an error, not EOF.
     read_error: Arc<Mutex<Option<String>>>,
+    /// The done marker of a command that ran out of time (see `exec`).
+    pub(super) pending_done: Option<String>,
 }
 
 impl Console {
@@ -86,6 +72,7 @@ impl Console {
             rx,
             transcript: Vec::new(),
             read_error,
+            pending_done: None,
         }
     }
 

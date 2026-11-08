@@ -10,4 +10,4 @@ pub mod protocol;
 
 pub use ansi::strip_ansi_codes;
 pub use boot::BootPatterns;
-pub use console::{CommandResult, Console};
+pub use console::Console;

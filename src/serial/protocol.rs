@@ -56,7 +56,7 @@ impl CommandMarkers {
     /// terminal shows it before the output, not inside it.
     pub fn wrap(&self, command: &str) -> String {
         let id = self.id.to_string();
-        let quoted = format!("'{}'", command.replace('\'', "'\\''"));
+        let quoted = crate::guest::shell_quote(command);
         let start = print_marker("START", &id, "");
         let done = print_marker("DONE", &id, " %s");
         format!("{start}; eval {quoted}; {done} $?\n")

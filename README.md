@@ -68,7 +68,10 @@ CODE/VARS pairs in `OVMF_FILES` in `src/lib.rs`.
 `serial::protocol` and `guest/serial-test.sh` are the two sides of it: the
 guest script (installed as a profile.d script by the live overlays) turns echo
 off on the serial console, empties the prompt and prints `SHELL_READY_MARKER`;
-`Console::exec` wraps each command in unique `printf`-printed markers and reads
+`Console::exec` (the `Guest` interface, which `recshuttle::Remote` also
+implements; a command that runs out of time is `Outcome::TimedOut`, and its
+late output is drained before the next one) wraps each command in unique
+`printf`-printed markers and reads
 its exit status, and `Console::login` drives getty and confirms the shell
 with a marker probe.
 
