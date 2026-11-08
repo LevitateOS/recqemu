@@ -12,9 +12,9 @@ const MAX_ATTEMPTS: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
-    WaitingForLoginPrompt,
-    WaitingForPasswordPrompt,
-    WaitingForShell,
+    LoginPrompt,
+    PasswordPrompt,
+    Shell,
 }
 
 impl Console {
@@ -25,13 +25,13 @@ impl Console {
     /// appears when a shell ran it.
     pub fn login(&mut self, username: &str, password: &str, timeout: Duration) -> Result<()> {
         let deadline = Instant::now() + timeout;
-        let mut state = State::WaitingForLoginPrompt;
+        let mut state = State::LoginPrompt;
         let mut rejected = 0u32;
         let mut quiet_since = Instant::now();
 
         self.send("\n")?;
         while Instant::now() < deadline {
-            if state == State::WaitingForShell && quiet_since.elapsed() >= Duration::from_secs(1) {
+            if state == State::Shell && quiet_since.elapsed() >= Duration::from_secs(1) {
                 self.send(&login_probe())?;
                 quiet_since = Instant::now();
             }
@@ -41,7 +41,7 @@ impl Console {
             quiet_since = Instant::now();
             let lower = strip_ansi_codes(&line).to_lowercase();
 
-            if state != State::WaitingForLoginPrompt
+            if state != State::LoginPrompt
                 && (lower.contains("login incorrect") || lower.contains("authentication failure"))
             {
                 rejected += 1;
@@ -51,19 +51,19 @@ impl Console {
                         self.tail()
                     );
                 }
-                state = State::WaitingForLoginPrompt;
+                state = State::LoginPrompt;
                 continue;
             }
             match state {
-                State::WaitingForLoginPrompt if lower.contains("login:") => {
+                State::LoginPrompt if lower.contains("login:") => {
                     self.send(&format!("{username}\n"))?;
-                    state = State::WaitingForPasswordPrompt;
+                    state = State::PasswordPrompt;
                 }
-                State::WaitingForPasswordPrompt if lower.contains("password") => {
+                State::PasswordPrompt if lower.contains("password") => {
                     self.send(&format!("{password}\n"))?;
-                    state = State::WaitingForShell;
+                    state = State::Shell;
                 }
-                State::WaitingForShell if line.contains(&login_ok_marker()) => return Ok(()),
+                State::Shell if line.contains(&login_ok_marker()) => return Ok(()),
                 _ => {}
             }
         }
