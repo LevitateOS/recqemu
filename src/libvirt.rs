@@ -59,9 +59,7 @@ pub struct DomainSpec {
     pub uefi_vars: UefiVars,
     /// The writable system disk, booted second when an ISO is attached.
     pub disk: Option<PathBuf>,
-    /// An ISO booted first, as a CD and also as a read-only disk: a CD
-    /// drive does not expose the ISO's appended partitions, which the live
-    /// init mounts the rootfs from (`recinit::live::ROOTFS_PAYLOAD_PARTITION`).
+    /// An ISO booted first, as a CD.
     pub boot_iso: Option<PathBuf>,
     /// Images attached as CDs that are not booted.
     pub extra_cdroms: Vec<PathBuf>,
@@ -135,7 +133,6 @@ impl DomainSpec {
         if let Some(iso) = &self.boot_iso {
             scsi(&mut x, "cdrom", iso, Some(boot_order));
             boot_order += 1;
-            scsi(&mut x, "disk", iso, None);
         }
         for cdrom in &self.extra_cdroms {
             scsi(&mut x, "cdrom", cdrom, None);
