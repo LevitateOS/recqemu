@@ -99,10 +99,23 @@ pub fn find_ovmf_vars() -> Result<PathBuf> {
 
 /// Create a qcow2 VM disk image of `size` (e.g., "20G").
 pub fn create_disk(path: &Path, size: &str) -> Result<()> {
+    qemu_img_create(&[], path, Some(size))
+}
+
+/// Create a qcow2 image at `path` that reads through to `backing` (also
+/// qcow2) and keeps every write itself, so `backing` is never changed.
+pub fn create_overlay(backing: &Path, path: &Path) -> Result<()> {
+    let backing = std::fs::canonicalize(backing)
+        .with_context(|| format!("resolving the overlay's backing image '{}'", backing.display()))?;
+    qemu_img_create(&["-F".as_ref(), "qcow2".as_ref(), "-b".as_ref(), backing.as_os_str()], path, None)
+}
+
+fn qemu_img_create(options: &[&std::ffi::OsStr], path: &Path, size: Option<&str>) -> Result<()> {
     let status = Command::new("qemu-img")
         .args(["create", "-q", "-f", "qcow2"])
+        .args(options)
         .arg(path)
-        .arg(size)
+        .args(size)
         .status()
         .context("running qemu-img (is QEMU installed?)")?;
     if !status.success() {
