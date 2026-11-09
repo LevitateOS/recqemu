@@ -3,8 +3,8 @@
 //!
 //! Each VM is a transient domain on the user's libvirt session
 //! (`qemu:///session`, [`URI`]): libvirt
-//! runs QEMU as the user, so images under the user's home need no
-//! relabelling, and user-mode networking (passt) forwards the guest's SSH to
+//! runs QEMU as the user. SELinux also requires VM-readable input labels.
+//! User-mode networking (passt) forwards the guest's SSH to
 //! localhost. A guest reboot or power-off ends the domain, as `-no-reboot`
 //! did. The serial port goes to a unix socket the caller connects to (or a
 //! pty for `virsh console`), with a transcript in a log file; the screen is

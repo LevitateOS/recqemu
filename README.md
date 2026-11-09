@@ -5,8 +5,8 @@ Scenario VMs as libvirt domains, and the serial console that drives them.
 Every VM the scenarios and `cargo xtask run` boot is a transient libvirt
 domain on the user's session (`qemu:///session`, `libvirt::URI`),
 so it can be watched and managed in Cockpit (Virtual Machines, user session)
-or with `virsh -c qemu:///session list`. libvirt runs QEMU as the user, so
-images under the user's home need no relabelling.
+or with `virsh -c qemu:///session list`. libvirt runs QEMU as the user.
+Unix file permissions and the host's SELinux policy both govern image access.
 
 ## Status
 
@@ -85,6 +85,21 @@ with a marker probe.
 - Cockpit with `cockpit-machines`, to manage the VMs in a browser (optional)
 
 `cargo xtask doctor` checks these.
+
+On an enforcing SELinux host, read-only VM inputs must have a type sVirt can
+read. A root-built ISO can retain `user_home_t` even though it is mode 0644;
+the user-session QEMU then reports permission denied. Prepare each new public
+ISO as its owner, for example:
+
+```sh
+sudo chcon -t virt_content_t -- /absolute/path/to/product.iso
+```
+
+This changes the host file's VM-content label and preserves its bytes and
+checksum. Keep SELinux enforcing and Recipe's private publications private.
+Writable guest disks and firmware state remain owned by the operator's
+session-libvirt workflow. The ISO example was exercised by the PRD15 product
+checks; its source-bound receipt is in the superproject's contribution queue.
 
 ## Consumers
 
